@@ -1,0 +1,18 @@
+{
+  "name": "botvps",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "",
+  "main": "bot.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "crypto": "^1.0.1",
+    "express": "^5.1.0"
+  }
+}
