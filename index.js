@@ -1,28 +1,31 @@
-// callback.js
-import express from "express";
-import crypto from "crypto";
+const express = require("express");
+const crypto = require("crypto");
 
 const app = express();
 app.use(express.json());
 
+// Ganti dengan API key kamu
 const API_KEY = "FCm5Xfjt52D2BdcpR2F91TOt1Y1TkzbW";
 
 app.post("/violet-callback", async (req, res) => {
   const data = req.body;
   const refid = data.ref;
+
+  // Buat signature verifikasi
   const signature = crypto
     .createHmac("sha256", API_KEY)
     .update(refid)
     .digest("hex");
 
   if (signature === data.signature && data.status === "success") {
-    console.log("Pembayaran sukses:", data);
+    console.log("✅ Pembayaran sukses:", data);
 
-    // TODO: update database atau kirim pesan ke Telegram
-    // misalnya update user premium status
+    // TODO: update status premium / kirim notifikasi ke Telegram
+  } else {
+    console.log("⚠️ Callback tidak valid atau status bukan success");
   }
 
   res.status(200).send("OK");
 });
 
-app.listen(3000, () => console.log("Callback server jalan di port 3000"));
+app.listen(3000, () => console.log("🚀 Callback server jalan di port 3000"));
