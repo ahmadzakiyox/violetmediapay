@@ -1,31 +1,50 @@
+require("dotenv").config(); // Tambahkan ini jika Anda tes lokal
 const express = require("express");
 const crypto = require("crypto");
 
 const app = express();
 app.use(express.json());
 
-// Ganti dengan API key kamu
-const API_KEY = "39QDt7fVWUuPqLsPDAF3XkuDQEKiZkxN9z";
+// AMBIL DARI ENVIRONMENT VARIABLE (SAMA SEPERTI bot.js)
+// ANDA HARUS SET VIOLET_SECRET_KEY DI PENGATURAN HEROKU (CONFIG VARS)
+const VIOLET_SECRET_KEY = process.env.VIOLET_SECRET_KEY;
 
 app.post("/violet-callback", async (req, res) => {
-  const data = req.body;
-  const refid = data.ref;
+  try {
+    const data = req.body;
+    const refid = data.ref;
 
-  // Buat signature verifikasi
-  const signature = crypto
-    .createHmac("sha256", API_KEY)
-    .update(refid)
-    .digest("hex");
+    if (!VIOLET_SECRET_KEY) {
+      console.error("❌ VIOLET_SECRET_KEY belum di-set di server callback!");
+      return res.status(500).send("Server error");
+    }
 
-  if (signature === data.signature && data.status === "success") {
-    console.log("✅ Pembayaran sukses:", data);
+    // Buat signature verifikasi menggunakan SECRET_KEY
+    const signature = crypto
+      .createHmac("sha256", VIOLET_SECRET_KEY) // <-- Ganti ke SECRET KEY
+      .update(refid)
+      .digest("hex");
 
-    // TODO: update status premium / kirim notifikasi ke Telegram
-  } else {
-    console.log("⚠️ Callback tidak valid atau status bukan success");
+    // Bandingkan signature
+    if (signature === data.signature) {
+      if (data.status === "success") {
+        console.log("✅ Pembayaran sukses:", data);
+        // TODO: update status premium / kirim notifikasi ke Telegram
+        // (Misal: Cari user berdasarkan data.ref, update isPremium = true)
+      } else {
+        console.log(`⚠️ Status callback: ${data.status} (Ref: ${refid})`);
+      }
+    } else {
+      console.log("🚫 Signature callback TIDAK VALID!");
+    }
+
+    res.status(200).send("OK");
+  } catch (err) {
+    console.error("❌ Error di callback:", err);
+    res.status(500).send("Error");
   }
-
-  res.status(200).send("OK");
 });
 
-app.listen(3000, () => console.log("🚀 Callback server jalan di port 3000"));
+// Fix untuk Port Heroku
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`🚀 Callback server jalan di port ${PORT}`));
