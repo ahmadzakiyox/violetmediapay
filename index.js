@@ -9,6 +9,7 @@ const PORT = process.env.PORT || 3000; // Port Heroku
 // Pastikan variabel ini diset di Heroku Config Vars
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const VIOLET_SECRET_KEY = process.env.VIOLET_SECRET_KEY;
+const VIOLET_API_KEY = process.env.VIOLET_API_KEY; // <--- DIBUTUHKAN UNTUK SIGNATURE CALLBACK
 const MONGO_URI = process.env.MONGO_URI;
 
 const bot = new Telegraf(BOT_TOKEN);
@@ -30,7 +31,7 @@ const User = mongoose.model("User", userSchema);
 
 app.use(express.json());
 
-// ===== FUNGSI NOTIFIKASI SUKSES =====
+// ===== FUNGSI NOTIFIKASI SUKSES (Di dalam server Heroku) =====
 async function sendSuccessNotification(refId, transactionData) {
     try {
         const user = await User.findOne({ refId: refId });
@@ -72,45 +73,45 @@ async function sendSuccessNotification(refId, transactionData) {
         console.error("❌ Callback: Error saat mengirim notifikasi sukses:", error);
     }
 }
-// ===================================
+// ==========================================================
 
 app.post("/violet-callback", async (req, res) => {
   const data = req.body;
   
-  // ====================== PERBAIKAN DI SINI ======================
-  // Kita cek data.ref_kode atau data.ref (nomor referensi callback)
+  // Ambil ref_kode atau ref (sesuai dokumentasi callback)
   const refid = data.ref_kode || data.ref; 
-  // ===============================================================
 
   try {
-    if (!VIOLET_SECRET_KEY) {
-      console.error("❌ Callback: VIOLET_SECRET_KEY belum diset!");
+    if (!VIOLET_API_KEY) { // Cek API Key (karena ini yang dipakai untuk signature)
+      console.error("❌ Callback: VIOLET_API_KEY belum diset!");
       return res.status(500).send("Server error");
     }
     
-    // Cek apakah refid berhasil ditemukan (untuk menghindari error 'undefined' di .update())
     if (!refid) {
-        console.error("❌ Callback: Nomor referensi (ref atau ref_kode) tidak ditemukan di body.");
+        console.error("❌ Callback: Nomor referensi (ref_kode/ref) tidak ditemukan di body.");
         return res.status(400).send({ status: false, message: "Missing reference ID" });
     }
 
-    // Buat dan Bandingkan Signature
+    // ====================== PERBAIKAN FINAL ======================
+    // Signature callback di-hash hanya dengan refid, dan di-keyed dengan API KEY.
     const signature = crypto
-      .createHmac("sha256", VIOLET_SECRET_KEY)
+      .createHmac("sha256", VIOLET_API_KEY) // <-- Kunci adalah API KEY (bukan Secret Key)
       .update(refid) 
       .digest("hex");
+    // ============================================================
 
     if (signature === data.signature) {
       if (data.status === "success") {
         console.log("✅ Callback SUCCESS diterima.");
         
+        // Panggil fungsi notifikasi
         await sendSuccessNotification(refid, data); 
 
       } else {
         console.log(`⚠️ Status callback diterima: ${data.status} (Ref: ${refid})`);
       }
     } else {
-      console.log("🚫 Signature callback TIDAK VALID!");
+      console.log(`🚫 Signature callback TIDAK VALID! Dikirim: ${data.signature}, Hitungan Server: ${signature}`);
     }
 
     res.status(200).send({ status: true }); 
