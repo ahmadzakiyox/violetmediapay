@@ -8,9 +8,10 @@ const PORT = process.env.PORT || 3000;
 
 // Ambil semua variabel dari Heroku Config Vars
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const VIOLET_API_KEY = process.env.VIOLET_API_KEY; // <-- Kunci validasi, sesuai dokumentasi
+const VIOLET_API_KEY = process.env.VIOLET_API_KEY; // Kunci validasi Violet Media Pay
 const MONGO_URI = process.env.MONGO_URI;
 
+// Inisialisasi Bot Telegraf
 const bot = new Telegraf(BOT_TOKEN);
 
 // ====== KONEKSI DATABASE & SCHEMA ======
@@ -22,16 +23,23 @@ const userSchema = new mongoose.Schema({
   userId: Number,
   username: String,
   isPremium: { type: Boolean, default: false },
-  refId: String,
+  refId: String, // Digunakan untuk mencocokkan transaksi dengan pengguna
   premiumUntil: Date
 });
 const User = mongoose.model("User", userSchema);
 // =======================================
 
+// ====== MIDDLEWARE UTAMA ======
 // Middleware untuk membaca JSON
 app.use(express.json());
 
-// ===== FUNGSI NOTIFIKASI SUKSES (Logika bisnis Anda) =====
+// 💡 PENTING: Middleware untuk membaca data yang dikirimkan sebagai form data (urlencoded)
+// Ini adalah solusi untuk mengatasi masalah 'signature: undefined' jika payment gateway mengirim sebagai form data.
+app.use(express.urlencoded({ extended: true })); 
+// =============================
+
+
+// ===== FUNGSI NOTIFIKASI SUKSES (Logika bisnis) =====
 async function sendSuccessNotification(refId, transactionData) {
     try {
         const user = await User.findOne({ refId: refId });
@@ -44,12 +52,13 @@ async function sendSuccessNotification(refId, transactionData) {
         const premiumDurationDays = 30; 
         let newExpiryDate = user.premiumUntil || new Date();
         
-        // Atur tanggal mulai perpanjangan: jika sudah expired, mulai dari sekarang. Jika belum, lanjutkan dari tanggal expired sebelumnya.
+        // Atur tanggal mulai perpanjangan
         if (newExpiryDate < new Date()) {
             newExpiryDate = new Date();
         }
         newExpiryDate.setDate(newExpiryDate.getDate() + premiumDurationDays);
 
+        // Update status premium di database
         await User.updateOne(
             { userId: telegramId },
             { 
@@ -58,9 +67,8 @@ async function sendSuccessNotification(refId, transactionData) {
             }
         );
 
-        // Menggunakan data dari callback untuk pesan
-        // Ambil nominal dari key 'nominal' yang ada di dokumentasi
-        const nominalDisplayed = transactionData.nominal || '0'; 
+        // Menggunakan data dari callback untuk pesan notifikasi
+        const nominalDisplayed = transactionData.nominal || transactionData.amount || '0';
 
         const message = `🎉 *PEMBAYARAN SUKSES!* 🎉\n\n` +
                         `Terima kasih, ${user.username || 'Pengguna'}!\n` +
@@ -81,13 +89,17 @@ async function sendSuccessNotification(refId, transactionData) {
 
 // 🔑 ENDPOINT CALLBACK UTAMA 🔑
 app.post("/violet-callback", async (req, res) => {
+    // req.body sekarang bisa berupa JSON atau Form Data (urlencoded)
     const data = req.body;
     
-    // 1. Ambil refid. Prioritas: data.ref (sesuai dokumentasi) atau data.ref_kode.
+    // 1. Ambil refid.
     const refid = data.ref || data.ref_kode; 
     
-    // 2. Ambil signature yang dikirim (dari body)
+    // 2. Ambil signature yang dikirim.
     const incomingSignature = data.signature;
+
+    console.log(`--- CALLBACK DITERIMA ---`);
+    console.log(`Data Body:`, data);
 
     try {
         if (!VIOLET_API_KEY) {
@@ -100,10 +112,10 @@ app.post("/violet-callback", async (req, res) => {
             return res.status(400).send({ status: false, message: "Missing reference ID" });
         }
 
-        // 3. Pembuatan signature (SESUAI DOKUMENTASI)
+        // 3. Pembuatan signature (SESUAI DOKUMENTASI Violet Media Pay)
         // Formula: hash_hmac('sha256', $refid, $apikey)
         const calculatedSignature = crypto
-            .createHmac("sha256", VIOLET_API_KEY) // Kunci: API KEY (rahasia)
+            .createHmac("sha256", VIOLET_API_KEY) // Kunci: API KEY
             .update(refid) // Data yang di-hash: refid
             .digest("hex");
 
@@ -116,19 +128,19 @@ app.post("/violet-callback", async (req, res) => {
                 await sendSuccessNotification(refid, data); 
             } else if (data.status === "failed") {
                 console.log(`⚠️ Status callback GAGAL diterima. Ref: ${refid}`);
-                // TODO: Tambahkan logika notifikasi kegagalan di sini jika perlu.
+                // Tambahkan logika untuk transaksi gagal (misalnya, notifikasi ke admin)
             } else {
                  console.log(`⚠️ Status callback diterima: ${data.status} (Ref: ${refid})`);
             }
         } else {
-            // Jika Signature tidak valid, ini adalah percobaan palsu. JANGAN PROSES.
+            // Jika Signature tidak valid, JANGAN PROSES
             console.log(`🚫 Signature callback TIDAK VALID!`);
             console.log(`- Dikirim: ${incomingSignature}`);
             console.log(`- Hitungan Server: ${calculatedSignature}`);
             console.log("--- Signature mismatch ---");
         }
 
-        // 6. Wajib mengirim status 200 OK ke Violet Media Pay agar tidak dikirim ulang
+        // 6. Wajib mengirim status 200 OK ke Violet Media Pay
         res.status(200).send({ status: true, message: "Callback received and processed" }); 
         
     } catch (error) {
