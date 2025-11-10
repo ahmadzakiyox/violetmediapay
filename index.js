@@ -1,7 +1,7 @@
 const express = require("express");
 const crypto = require("crypto");
 const mongoose = require("mongoose");
-const { Telegraf } = require("telegraf"); // Digunakan untuk mengirim notifikasi
+const { Telegraf } = require("telegraf");
 
 const app = express();
 const PORT = process.env.PORT || 3000; // Port Heroku
@@ -11,10 +11,9 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const VIOLET_SECRET_KEY = process.env.VIOLET_SECRET_KEY;
 const MONGO_URI = process.env.MONGO_URI;
 
-// Inisialisasi Bot Client untuk mengirim pesan (bukan untuk menerima)
 const bot = new Telegraf(BOT_TOKEN);
 
-// ====== KONEKSI DATABASE & SCHEMA (Diambil dari bot.js) ======
+// ====== KONEKSI DATABASE & SCHEMA ======
 mongoose.connect(MONGO_URI)
   .then(() => console.log("✅ Callback Server: MongoDB Connected"))
   .catch(err => console.error("❌ Callback Server: MongoDB Error:", err));
@@ -27,14 +26,13 @@ const userSchema = new mongoose.Schema({
   premiumUntil: Date
 });
 const User = mongoose.model("User", userSchema);
-// ==========================================================
+// =======================================
 
 app.use(express.json());
 
-// ===== FUNGSI NOTIFIKASI SUKSES (Di dalam server Heroku) =====
+// ===== FUNGSI NOTIFIKASI SUKSES =====
 async function sendSuccessNotification(refId, transactionData) {
     try {
-        // Cari pengguna berdasarkan refId transaksi
         const user = await User.findOne({ refId: refId });
 
         if (!user) {
@@ -45,14 +43,12 @@ async function sendSuccessNotification(refId, transactionData) {
         const telegramId = user.userId;
         const premiumDurationDays = 30; 
 
-        // 1. Hitung tanggal kedaluwarsa baru (Logika yang sama seperti di bot.js)
         let newExpiryDate = user.premiumUntil || new Date();
         if (newExpiryDate < new Date()) {
             newExpiryDate = new Date();
         }
         newExpiryDate.setDate(newExpiryDate.getDate() + premiumDurationDays);
 
-        // 2. Update status pengguna di database
         await User.updateOne(
             { userId: telegramId },
             { 
@@ -61,7 +57,6 @@ async function sendSuccessNotification(refId, transactionData) {
             }
         );
 
-        // 3. Kirim notifikasi sukses menggunakan BOT_TOKEN
         const message = `🎉 *PEMBAYARAN SUKSES!* 🎉\n\n` +
                         `Terima kasih, ${user.username || 'Pengguna'}!\n` +
                         `Transaksi Anda telah berhasil dibayar.\n\n` +
@@ -77,20 +72,29 @@ async function sendSuccessNotification(refId, transactionData) {
         console.error("❌ Callback: Error saat mengirim notifikasi sukses:", error);
     }
 }
-// ==========================================================
+// ===================================
 
 app.post("/violet-callback", async (req, res) => {
   const data = req.body;
-  const refid = data.ref_kode; // Gunakan ref_kode
+  
+  // ====================== PERBAIKAN DI SINI ======================
+  // Kita cek data.ref_kode atau data.ref (nomor referensi callback)
+  const refid = data.ref_kode || data.ref; 
+  // ===============================================================
 
   try {
-    // 1. Validasi Secret Key
     if (!VIOLET_SECRET_KEY) {
       console.error("❌ Callback: VIOLET_SECRET_KEY belum diset!");
       return res.status(500).send("Server error");
     }
+    
+    // Cek apakah refid berhasil ditemukan (untuk menghindari error 'undefined' di .update())
+    if (!refid) {
+        console.error("❌ Callback: Nomor referensi (ref atau ref_kode) tidak ditemukan di body.");
+        return res.status(400).send({ status: false, message: "Missing reference ID" });
+    }
 
-    // 2. Buat dan Bandingkan Signature
+    // Buat dan Bandingkan Signature
     const signature = crypto
       .createHmac("sha256", VIOLET_SECRET_KEY)
       .update(refid) 
@@ -100,7 +104,6 @@ app.post("/violet-callback", async (req, res) => {
       if (data.status === "success") {
         console.log("✅ Callback SUCCESS diterima.");
         
-        // Panggil fungsi notifikasi
         await sendSuccessNotification(refid, data); 
 
       } else {
@@ -110,7 +113,6 @@ app.post("/violet-callback", async (req, res) => {
       console.log("🚫 Signature callback TIDAK VALID!");
     }
 
-    // Wajib kirim 200 OK
     res.status(200).send({ status: true }); 
     
   } catch (error) {
