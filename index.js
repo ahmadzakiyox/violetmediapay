@@ -8,7 +8,8 @@ const PORT = process.env.PORT || 3000;
 
 // Ambil semua variabel dari Heroku Config Vars
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const VIOLET_API_KEY = process.env.VIOLET_API_KEY; // <-- Kunci Validasi Callback
+const VIOLET_API_KEY = process.env.VIOLET_API_KEY; // <-- Digunakan sebagai bagian dari data
+const VIOLET_SECRET_KEY = process.env.VIOLET_SECRET_KEY; // <-- Kunci HMAC
 const MONGO_URI = process.env.MONGO_URI;
 
 const bot = new Telegraf(BOT_TOKEN);
@@ -74,31 +75,30 @@ async function sendSuccessNotification(refId, transactionData) {
 
 app.post("/violet-callback", async (req, res) => {
   const data = req.body;
-  // Dokumentasi menggunakan 'ref' dan 'id_reference', namun transaksi Anda menggunakan 'ref_kode'.
-  // Kita akan ambil refid dari data.ref (sesuai dokumentasi) atau data.ref_kode (sesuai transaksi Anda).
-  const refid = data.ref || data.ref_kode; 
-  
-  // Ambil signature dari body sesuai contoh PHP: $signature = $data->signature
+  const refid = data.ref_kode || data.ref; 
   const incomingSignature = data.signature;
 
   try {
-    if (!VIOLET_API_KEY) {
-      console.error("❌ Callback: VIOLET_API_KEY belum diset!");
+    if (!VIOLET_SECRET_KEY || !VIOLET_API_KEY) {
+      console.error("❌ Callback: Key tidak lengkap!");
       return res.status(500).send({ status: false, message: "Server API Key Missing" });
     }
     
-    if (!refid) {
-        console.error("❌ Callback: Nomor referensi (ref/ref_kode) tidak ditemukan di body.");
-        return res.status(400).send({ status: false, message: "Missing reference ID" });
+    if (!refid || !data.nominal) {
+        console.error("❌ Callback: Parameter penting (refid atau nominal) tidak ditemukan di body.");
+        return res.status(400).send({ status: false, message: "Missing required data" });
     }
-    
-    // --- SESUAI DOKUMENTASI CALLBACK: hash_hmac('sha256', $refid, $apikey) ---
-    const calculatedSignature = crypto
-      .createHmac("sha256", VIOLET_API_KEY) // Kunci adalah API KEY!
-      .update(refid) // Data adalah refid saja!
-      .digest("hex");
 
-    // 2. Bandingkan
+    // ====================== PERBAIKAN AKHIR ======================
+    // Menerapkan formula transaksi penuh (ref_kode + apikey + amount)
+    const dataString = refid + VIOLET_API_KEY + data.nominal;
+
+    const calculatedSignature = crypto
+      .createHmac("sha256", VIOLET_SECRET_KEY) 
+      .update(dataString) // Data adalah refid + API_KEY + Nominal
+      .digest("hex");
+    // ============================================================
+
     if (calculatedSignature === incomingSignature) {
       if (data.status === "success") {
         console.log("✅ Callback SUCCESS diterima. Validasi Signature Berhasil.");
@@ -113,7 +113,6 @@ app.post("/violet-callback", async (req, res) => {
         console.log("--- Signature mismatch ---");
     }
 
-    // Wajib mengirim status 200 OK
     res.status(200).send({ status: true }); 
     
   } catch (error) {
