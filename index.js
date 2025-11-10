@@ -8,8 +8,8 @@ const PORT = process.env.PORT || 3000;
 
 // Ambil semua variabel dari Heroku Config Vars
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const VIOLET_API_KEY = process.env.VIOLET_API_KEY; // <-- Digunakan sebagai bagian dari data
-const VIOLET_SECRET_KEY = process.env.VIOLET_SECRET_KEY; // <-- Kunci HMAC
+const VIOLET_API_KEY = process.env.VIOLET_API_KEY; 
+const VIOLET_SECRET_KEY = process.env.VIOLET_SECRET_KEY; 
 const MONGO_URI = process.env.MONGO_URI;
 
 const bot = new Telegraf(BOT_TOKEN);
@@ -60,7 +60,7 @@ async function sendSuccessNotification(refId, transactionData) {
                         `Terima kasih, ${user.username || 'Pengguna'}!\n` +
                         `Transaksi Anda telah berhasil dibayar.\n\n` +
                         `📦 Produk: ${transactionData.produk}\n` +
-                        `💰 Nominal: Rp${parseInt(transactionData.nominal).toLocaleString('id-ID')}\n\n` +
+                        `💰 Nominal: Rp${parseInt(transactionData.nominal || transactionData.amount || transactionData.total_amount).toLocaleString('id-ID')}\n\n` +
                         `🌟 Akses premium Anda diaktifkan hingga: *${newExpiryDate.toLocaleDateString("id-ID")}*.`;
         
         await bot.telegram.sendMessage(telegramId, message, { parse_mode: 'Markdown' });
@@ -76,6 +76,7 @@ async function sendSuccessNotification(refId, transactionData) {
 app.post("/violet-callback", async (req, res) => {
   const data = req.body;
   const refid = data.ref_kode || data.ref; 
+  const amount = data.nominal || data.amount || data.total_amount; // Ekstraksi Nominal yang Kuat
   const incomingSignature = data.signature;
 
   try {
@@ -84,20 +85,21 @@ app.post("/violet-callback", async (req, res) => {
       return res.status(500).send({ status: false, message: "Server API Key Missing" });
     }
     
-    if (!refid || !data.nominal) {
-        console.error("❌ Callback: Parameter penting (refid atau nominal) tidak ditemukan di body.");
-        return res.status(400).send({ status: false, message: "Missing required data" });
+    // ====================== PERBAIKAN DI SINI ======================
+    // Cek apakah nominal ditemukan (jika nominal tidak ada, amount harus ada)
+    if (!refid || !amount) { 
+        console.error("❌ Callback: Parameter penting (refid atau nominal/amount) tidak ditemukan di body.");
+        return res.status(400).send({ status: false, message: "Missing required data: refid or amount" });
     }
+    // ===============================================================
 
-    // ====================== PERBAIKAN AKHIR ======================
     // Menerapkan formula transaksi penuh (ref_kode + apikey + amount)
-    const dataString = refid + VIOLET_API_KEY + data.nominal;
+    const dataString = refid + VIOLET_API_KEY + amount;
 
     const calculatedSignature = crypto
       .createHmac("sha256", VIOLET_SECRET_KEY) 
-      .update(dataString) // Data adalah refid + API_KEY + Nominal
+      .update(dataString) 
       .digest("hex");
-    // ============================================================
 
     if (calculatedSignature === incomingSignature) {
       if (data.status === "success") {
