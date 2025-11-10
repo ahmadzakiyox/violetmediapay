@@ -31,7 +31,7 @@ const User = mongoose.model("User", userSchema);
 // Middleware untuk membaca JSON
 app.use(express.json());
 
-// ===== FUNGSI NOTIFIKASI SUKSES (Logika bisnis Anda) =====
+// ===== FUNGSI NOTIFIKASI SUKSES (Tidak Berubah) =====
 async function sendSuccessNotification(refId, transactionData) {
     try {
         const user = await User.findOne({ refId: refId });
@@ -56,7 +56,6 @@ async function sendSuccessNotification(refId, transactionData) {
             }
         );
 
-        // Menggunakan data dari callback untuk pesan
         const nominalDisplayed = transactionData.nominal || transactionData.amount || transactionData.total_amount || '0';
 
         const message = `🎉 *PEMBAYARAN SUKSES!* 🎉\n\n` +
@@ -74,16 +73,19 @@ async function sendSuccessNotification(refId, transactionData) {
         console.error("❌ Callback: Error saat mengirim notifikasi sukses:", error);
     }
 }
-// ==========================================================
+// ===================================================
 
 app.post("/violet-callback", async (req, res) => {
   const data = req.body;
   
-  // 1. Ambil refid. Prioritas: data.ref (sesuai dokumentasi) atau data.ref_kode.
+  // 1. Ambil refid. Dokumen PHP menggunakan $data->ref.
   const refid = data.ref || data.ref_kode; 
   
-  // 2. Ambil signature yang dikirim (dari body, sesuai contoh PHP)
+  // 2. Ambil signature yang dikirim. Dokumen PHP menggunakan $data->signature.
   const incomingSignature = data.signature;
+
+  console.log("--- START CALLBACK ---");
+  console.log("Data diterima:", JSON.stringify(data));
 
   try {
     if (!VIOLET_API_KEY) {
@@ -95,12 +97,12 @@ app.post("/violet-callback", async (req, res) => {
         console.error("❌ Callback: Nomor referensi (ref/ref_kode) tidak ditemukan di body.");
         return res.status(400).send({ status: false, message: "Missing reference ID" });
     }
-
-    // 3. Pembuatan signature (SESUAI 100% DOKUMENTASI CALLBACK)
+    
+    // --- 3. PEMBUATAN SIGNATURE (SESUAI DOKUMENTASI) ---
     // Formula: hash_hmac('sha256', $refid, $apikey)
     const calculatedSignature = crypto
-      .createHmac("sha256", VIOLET_API_KEY) // Kunci: API KEY
-      .update(refid) // Data: refid saja
+      .createHmac("sha256", VIOLET_API_KEY) // Kunci adalah API KEY!
+      .update(refid) // Data adalah refid saja!
       .digest("hex");
 
     // 4. Bandingkan
@@ -124,6 +126,8 @@ app.post("/violet-callback", async (req, res) => {
   } catch (error) {
     console.error("❌ Callback: Error saat memproses callback:", error);
     res.status(500).send({ status: false });
+  } finally {
+    console.log("--- END CALLBACK ---");
   }
 });
 
