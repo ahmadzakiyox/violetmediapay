@@ -1,4 +1,4 @@
-require("dotenv").config(); // Tambahkan ini jika Anda tes lokal
+
 const express = require("express");
 const crypto = require("crypto");
 
