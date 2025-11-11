@@ -63,9 +63,8 @@ async function sendSuccessNotification(refId, transactionData) {
         return;
     }
 
-    // Konfigurasi Coba Ulang (Mengatasi Race Condition)
     const MAX_RETRIES = 5; 
-    const RETRY_DELAY = 2000; 
+    const RETRY_DELAY = 2000;
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         try {
@@ -73,31 +72,30 @@ async function sendSuccessNotification(refId, transactionData) {
             let user = await User.findOne({
                 $or: [
                     { refId: refId },
-                    { userId: telegramId } // Fallback: Cari dengan ID
+                    { userId: telegramId } 
                 ]
             });
 
             if (!user) {
                 if (attempt < MAX_RETRIES) {
-                    // Tunggu dan Coba Lagi
                     console.log(`⏳ Callback: User ${refId} belum ditemukan. Mencoba lagi dalam ${RETRY_DELAY / 1000} detik (Percobaan ${attempt}/${MAX_RETRIES}).`);
                     await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
                     continue; 
                 } else {
-                    // Percobaan terakhir: Paksa UPSERT (buat user jika belum ada)
+                    // Percobaan terakhir: Paksa UPSERT
                     console.log(`⚠️ Callback UPSERT: User ${refId} tidak ditemukan. Mencoba membuat/update via UPSERT.`);
                     
                     const uniqueEmailPlaceholder = `tg_${telegramId}_${Date.now()}@callback.co`;
                     
                     user = await User.findOneAndUpdate(
-                        { userId: telegramId }, // Cari berdasarkan ID
+                        { userId: telegramId }, 
                         {
                             userId: telegramId,
                             username: telegramUsername,
                             refId: refId,
                             email: uniqueEmailPlaceholder
                         },
-                        { new: true, upsert: true, setDefaultsOnInsert: true } // Opsi KRITIS: UPSERT
+                        { new: true, upsert: true, setDefaultsOnInsert: true }
                     );
 
                     if (!user) {
@@ -118,10 +116,21 @@ async function sendSuccessNotification(refId, transactionData) {
 
             const updateResult = await User.updateOne(
                 { userId: telegramId },
-                { isPremium: true, premiumUntil: newExpiryDate, refId: refId }
+                { 
+                    isPremium: true, 
+                    premiumUntil: newExpiryDate, 
+                    refId: refId 
+                }
             );
             
-            console.log(`✅ DATABASE SUCCESS: User ${telegramId} DI-SET PREMIUM hingga ${newExpiryDate.toLocaleDateString()}. Update Count: ${updateResult.modifiedCount}`);
+            // >>> DIAGNOSTIK KRITIS: Log hasil operasi update
+            console.log(`\n============== CALLBACK SUCCESS LOG ==============`);
+            console.log(`✅ User ${telegramId} | ${telegramUsername} TELAH DI-SET PREMIUM!`);
+            console.log(`   isPremium: true`);
+            console.log(`   premiumUntil: ${newExpiryDate.toISOString()}`);
+            console.log(`   MongoDB Update Result (Modified/Upserted): ${updateResult.modifiedCount || updateResult.upsertedCount}`);
+            console.log(`   Transaction Ref ID: ${refId}`);
+            console.log(`==================================================\n`);
 
 
             // 3. Kirim notifikasi sukses
@@ -136,7 +145,6 @@ async function sendSuccessNotification(refId, transactionData) {
             
             await bot.telegram.sendMessage(telegramId, message, { parse_mode: 'Markdown' }).catch(e => console.error("Gagal kirim notif premium:", e.message));
 
-            console.log(`✅ Callback: Notifikasi sukses terkirim ke user ${telegramId}`);
             return; 
             
         } catch (error) {
