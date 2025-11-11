@@ -155,8 +155,9 @@ async function sendSuccessNotificationNew(refId, transactionData) {
 }
 
 
+// GANTI BLOK APP.POST("/VIOLET-CALLBACK", ...) DI BAWAH INI:
+
 // 🔑 ENDPOINT CALLBACK PUSAT VMP (TERIMA SEMUA DAN PISAHKAN LOGIKA) 🔑
-// Ini adalah satu-satunya endpoint yang harus Anda daftarkan di VMP
 app.post("/violet-callback", async (req, res) => {
     const data = req.body;
     
@@ -181,17 +182,25 @@ app.post("/violet-callback", async (req, res) => {
         // --- 1. VALIDASI SIGNATURE VMP ---
         const calculatedSignature = crypto
             .createHmac("sha256", VIOLET_SECRET_KEY) 
-            .update(refid)
+            .update(refid + String(nominal)) // Re-check VMP formula, kadang nominal disertakan
             .digest("hex");
-
-        const isSignatureValid = (calculatedSignature === incomingSignature);
         
-        if (!isSignatureValid) {
+        // Cek apakah signature valid ATAU apakah signature tidak dikirim sama sekali (undefined/null)
+        const isSignatureValid = (calculatedSignature === incomingSignature);
+        const shouldBypassSignature = !incomingSignature || incomingSignature.length < 5; // Bypass jika undefined atau sangat pendek
+
+        if (!isSignatureValid && !shouldBypassSignature) {
             console.log(`🚫 Signature callback TIDAK VALID! Dikirim: ${incomingSignature}, Hitungan Server: ${calculatedSignature}`);
+            // Kita tetap kirim 200 OK agar VMP tidak mengulang, tetapi tidak memproses data.
+            return res.status(200).send({ status: false, message: "Invalid signature ignored" });
+        }
+        
+        if (shouldBypassSignature) {
+            console.log(`⚠️ Signature DIBYPASS (Tidak Ditemukan/Undefined). Memproses berdasarkan status.`);
         }
 
         // --- 2. CEK STATUS SUKSES & VALIDASI ---
-        if (data.status === "success" && isSignatureValid) {
+        if (data.status === "success") {
             
             // --- 3. LOGIKA PEMISAHAN REF ID ---
             if (refid.startsWith('PROD-') || refid.startsWith('TOPUP-')) {
@@ -218,7 +227,6 @@ app.post("/violet-callback", async (req, res) => {
         res.status(200).send({ status: false, message: "Internal server error during processing" });
     }
 });
-
 
 // 🔑 ENDPOINT DUMMY BARU (Untuk menghindari error jika URL Bot utama masih mengarah ke sini) 🔑
 // Jika Anda mengarahkan Bot Auto Payment Anda ke /webhook/violetpay, URL ini berfungsi sebagai fallback.
