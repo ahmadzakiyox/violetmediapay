@@ -17,7 +17,7 @@ const ADMIN_IDS = process.env.ADMIN_IDS ? process.env.ADMIN_IDS.split(',').map(i
 const PORT = process.env.PORT || 3000; 
 
 // Konfigurasi Link & Premium
-const SERVER_BASE_URL = process.env.SERVER_BASE_URL; // URL Publik Heroku
+const SERVER_BASE_URL = process.env.SERVER_BASE_URL; 
 const MAX_LINKS_NON_PREMIUM = 3; 
 const PREMIUM_PRICE = 10000; 
 
@@ -78,8 +78,9 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model("User", userSchema);
 
+
 // ====================================================
-// ====== UTILITY FUNCTIONS ======
+// ====== UTILITY FUNCTIONS (USER LOGIC) ======
 // ====================================================
 
 function isPremium(user) {
@@ -93,10 +94,8 @@ function isPremium(user) {
     return false;
 }
 
-// FIX: Memastikan email unik saat membuat user baru untuk menghindari E11000
-async function getUser(ctx) {
-    const userId = ctx.from.id;
-    const username = ctx.from.username || ctx.from.first_name;
+// Fungsi internal untuk fetch/create user
+async function _fetchUserAndCreateIfMissing(userId, username) {
     let user = await User.findOne({ userId });
 
     if (!user) {
@@ -141,6 +140,28 @@ const adminGuard = (ctx, next) => {
 };
 
 
+// ----------------------------------------------------
+// ====== MIDDLEWARE STABIL UNTUK MEMUAT DATA USER ======
+// ----------------------------------------------------
+
+async function userLoader(ctx, next) {
+    // Hanya proses pesan dari chat pribadi, dan abaikan jika tidak ada ctx.from
+    if (ctx.from && ctx.chat.type === 'private') {
+        try {
+            const userId = ctx.from.id;
+            const username = ctx.from.username || ctx.from.first_name;
+            // Panggil fungsi untuk memuat/membuat user
+            ctx.state.user = await _fetchUserAndCreateIfMissing(userId, username);
+        } catch (err) {
+            console.error("❌ Middleware Error during userLoader:", err);
+            // Jika database gagal, berikan pesan error yang jelas, JANGAN biarkan bot diam.
+            return ctx.reply('⚠️ Maaf, terjadi masalah saat mengakses database. Mohon coba lagi.');
+        }
+    }
+    return next(); // Lanjutkan ke handler perintah
+}
+
+
 // ====================================================
 // ====== TELEGRAF BOT INITALIZATION & EXPRESS SETUP ======
 // ====================================================
@@ -151,14 +172,16 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true })); 
 
+// 🚨 Terapkan User Loader di atas semua handler
+bot.use(userLoader); 
+
 
 // ----------------------------------------------------
 // ====== ENDPOINT 2: TELEGRAM WEBHOOK (FIXED ROUTING) ======
 // ----------------------------------------------------
 
-// 🚀 PERBAIKAN KRITIS: Menggunakan app.post secara eksplisit untuk Webhook
+// Menggunakan app.post secara eksplisit untuk Webhook Telegram.
 app.post(WEBHOOK_TELEGRAM_PATH, (req, res) => {
-    // Memaksa Express untuk menyerahkan body request ke Telegraf untuk diproses.
     bot.handleUpdate(req.body, res); 
 });
 
@@ -229,8 +252,10 @@ const mainKeyboard = Markup.keyboard([
 ]).resize();
 
 bot.start(async (ctx) => {
-    await getUser(ctx);
-    const firstName = ctx.from.first_name || 'Pengguna';
+    const user = ctx.state.user; // Ambil dari state
+    if (!user) return; // User tidak berhasil dimuat
+    
+    const firstName = user.username || 'Pengguna';
     ctx.replyWithHTML(
         `👋 <b>Halo ${firstName}!</b>\n\nSaya adalah bot pelacak keluarga berbasis izin.\n\nGunakan tombol di bawah untuk navigasi cepat.`,
         mainKeyboard
@@ -257,7 +282,9 @@ bot.command('help', (ctx) => {
 
 // Perintah: /buatlink
 bot.command('buatlink', async (ctx) => {
-    const user = await getUser(ctx);
+    const user = ctx.state.user; // Ambil dari state
+    if (!user) return; 
+
     const adminId = user.userId.toString();
     const isUserPremium = isPremium(user);
     const userLinks = linksDb[adminId];
@@ -294,7 +321,9 @@ bot.command('buatlink', async (ctx) => {
 
 // Perintah: /listlink
 bot.command('listlink', async (ctx) => {
-    const user = await getUser(ctx);
+    const user = ctx.state.user; // Ambil dari state
+    if (!user) return; 
+    
     const userLinks = linksDb[user.userId.toString()];
     if (!userLinks || Object.keys(userLinks).length === 0) { return ctx.reply('Anda belum membuat link apapun.'); }
     let message = '📋 <b>Daftar Link Aktif Anda:</b>\n\n';
@@ -316,13 +345,15 @@ bot.action(/delete:(.+)/, (ctx) => {
 
 // Perintah: /premium & checkout logic
 bot.command('premium', async (ctx) => {
-    const user = await getUser(ctx);
+    const user = ctx.state.user; // Ambil dari state
+    if (!user) return; 
+    
     if (isPremium(user)) { const expiry = user.premiumUntil.toLocaleDateString("id-ID", { year: 'numeric', month: 'long', day: 'numeric' }); return ctx.reply(`👑 Anda sudah Premium!\nPremium Anda berlaku hingga: *${expiry}*.`, { parse_mode: 'Markdown' }); }
     const premiumMessage = `💳 *Akses Premium Bot Pelacak* 💳\n\nUpgrade ke Premium...\n\n💰 *Harga:* Rp${PREMIUM_PRICE.toLocaleString('id-ID')} (Untuk 30 hari)\nTekan tombol di bawah untuk melakukan pembayaran.`;
     ctx.reply(premiumMessage, { parse_mode: 'Markdown', ...Markup.inlineKeyboard([Markup.button.callback('Lanjutkan Pembayaran', 'checkout_premium')]) });
 });
 bot.action('checkout_premium', async (ctx) => {
-    // Logika Checkout
+    // Logika Checkout sama persis
     await ctx.answerCbQuery('Membuat transaksi...');
     if (!VIOLET_API_KEY || !VIOLET_SECRET_KEY || !CALLBACK_URL) { return ctx.reply("❌ Konfigurasi Pembayaran tidak lengkap. Hubungi Admin."); }
     
@@ -348,6 +379,7 @@ bot.action('checkout_premium', async (ctx) => {
 
 // Perintah ADMIN
 bot.command('addpremium', adminGuard, async (ctx) => {
+    // ... Logika Admin sama persis ...
     const args = ctx.message.text.split(/\s+/); args.shift(); const targetId = parseInt(args[0]); let durationDays = parseInt(args[1]);
     if (isNaN(targetId) || isNaN(durationDays) || durationDays <= 0) { return ctx.reply('⚠️ Format salah.', { parse_mode: 'Markdown' }); }
     try {
