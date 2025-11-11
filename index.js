@@ -41,48 +41,68 @@ app.use(express.urlencoded({ extended: true }));
 // =============================
 
 
-// ===== FUNGSI NOTIFIKASI SUKSES (Logika bisnis) =====
+// ====== FUNGSI NOTIFIKASI SUKSES (Logika bisnis) =====
 async function sendSuccessNotification(refId, transactionData) {
-    try {
-        const user = await User.findOne({ refId: refId });
-        if (!user) {
-            console.error(`❌ Callback: User dengan refId ${refId} tidak ditemukan di DB.`);
+    
+    // Konfigurasi Coba Ulang
+    const MAX_RETRIES = 5; 
+    const RETRY_DELAY = 2000; // Tunggu 2 detik antar percobaan
+
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        try {
+            const user = await User.findOne({ refId: refId });
+            
+            if (!user) {
+                // User TIDAK ditemukan: Tunggu dan Coba Lagi
+                if (attempt < MAX_RETRIES) {
+                    console.log(`⏳ Callback: User ${refId} belum ditemukan. Mencoba lagi dalam ${RETRY_DELAY / 1000} detik (Percobaan ${attempt}/${MAX_RETRIES}).`);
+                    await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
+                    continue; // Lanjut ke iterasi loop (coba lagi)
+                } else {
+                    // Gagal setelah semua percobaan
+                    console.error(`❌ Callback: Gagal menemukan User ${refId} setelah ${MAX_RETRIES} percobaan. Mengabaikan transaksi.`);
+                    return; 
+                }
+            }
+
+            // --- JIKA USER DITEMUKAN (Logika Sukses) ---
+            const telegramId = user.userId;
+            const premiumDurationDays = 30; 
+            
+            // ... (lanjutkan logika update user) ...
+            let newExpiryDate = user.premiumUntil || new Date();
+            if (newExpiryDate < new Date()) {
+                newExpiryDate = new Date();
+            }
+            newExpiryDate.setDate(newExpiryDate.getDate() + premiumDurationDays);
+
+            await User.updateOne(
+                { userId: telegramId },
+                { 
+                    isPremium: true,
+                    premiumUntil: newExpiryDate 
+                }
+            );
+
+            // ... (Lanjutkan logika kirim notifikasi ke Telegram) ...
+            const nominalDisplayed = transactionData.nominal || transactionData.total_amount || '0';
+            const message = `🎉 *PEMBAYARAN SUKSES!* 🎉\n\n` +
+                            `Terima kasih, ${user.username || 'Pengguna'}!\n` +
+                            `Transaksi Anda telah berhasil dibayar.\n\n` +
+                            `📦 Produk: ${transactionData.produk || 'Akses Premium'}\n` +
+                            `💰 Nominal: Rp${parseInt(nominalDisplayed).toLocaleString('id-ID')}\n` +
+                            `🧾 Ref ID: ${refId}\n\n` +
+                            `🌟 Akses premium Anda diaktifkan hingga: *${newExpiryDate.toLocaleDateString("id-ID")}*.`;
+            
+            await bot.telegram.sendMessage(telegramId, message, { parse_mode: 'Markdown' });
+
+            console.log(`✅ Callback: Notifikasi sukses dan status premium diupdate untuk user ${telegramId}`);
+            return; // Sukses, keluar dari loop
+            
+        } catch (error) {
+            console.error("❌ Callback: Error saat memproses notifikasi:", error);
             return;
         }
-
-        const telegramId = user.userId;
-        const premiumDurationDays = 30; 
-        let newExpiryDate = user.premiumUntil || new Date();
-        
-        if (newExpiryDate < new Date()) {
-            newExpiryDate = new Date();
-        }
-        newExpiryDate.setDate(newExpiryDate.getDate() + premiumDurationDays);
-
-        await User.updateOne(
-            { userId: telegramId },
-            { 
-                isPremium: true,
-                premiumUntil: newExpiryDate 
-            }
-        );
-
-        const nominalDisplayed = transactionData.nominal || transactionData.total_amount || '0';
-
-        const message = `🎉 *PEMBAYARAN SUKSES!* 🎉\n\n` +
-                        `Terima kasih, ${user.username || 'Pengguna'}!\n` +
-                        `Transaksi Anda telah berhasil dibayar.\n\n` +
-                        `📦 Produk: ${transactionData.produk || 'Akses Premium'}\n` +
-                        `💰 Nominal: Rp${parseInt(nominalDisplayed).toLocaleString('id-ID')}\n` +
-                        `🧾 Ref ID: ${refId}\n\n` +
-                        `🌟 Akses premium Anda diaktifkan hingga: *${newExpiryDate.toLocaleDateString("id-ID")}*.`;
-        
-        await bot.telegram.sendMessage(telegramId, message, { parse_mode: 'Markdown' });
-
-        console.log(`✅ Callback: Notifikasi sukses dan status premium diupdate untuk user ${telegramId}`);
-
-    } catch (error) {
-        console.error("❌ Callback: Error saat mengirim notifikasi sukses:", error);
     }
 }
 // ==========================================================
