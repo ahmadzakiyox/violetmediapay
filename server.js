@@ -1,73 +1,41 @@
-const express = require("express");
-const { Telegraf, Markup } = require('telegraf');
-const mongoose = require("mongoose");
-const fs = require('fs');
-const path = require('path');
-const axios = require('axios');
-const crypto = require("crypto");
-const { URLSearchParams } = require("url"); 
-const fetch = require('node-fetch'); 
+// callback_server.js
+const express = require('express');
+const bodyParser = require('body-parser');
+const crypto = require('crypto');
+const mongoose = require('mongoose');
 
+// Import Telegraf untuk notifikasi
+const { Telegraf } = require('telegraf'); 
+
+// Pastikan Anda memuat konfigurasi dari .env
 require("dotenv").config();
 
-// ====== KONFIGURASI UMUM ======
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const MONGO_URI = process.env.MONGO_URI;
-const ADMIN_IDS = process.env.ADMIN_IDS ? process.env.ADMIN_IDS.split(',').map(id => parseInt(id.trim())) : [];
-const PORT = process.env.PORT || 3000; 
+// ====================================================
+// ====== KONFIGURASI & SETUP ======
+// ====================================================
 
-// Konfigurasi Link & Premium
-const SERVER_BASE_URL = process.env.SERVER_BASE_URL; 
-const MAX_LINKS_NON_PREMIUM = 3; 
-const PREMIUM_PRICE = 10000; 
-
-// Konfigurasi Violet Media Pay
+const MONGO_URI = process.env.MONGO_URI; 
 const VIOLET_API_KEY = process.env.VIOLET_API_KEY;
 const VIOLET_SECRET_KEY = process.env.VIOLET_SECRET_KEY;
-const CALLBACK_URL = process.env.CALLBACK_URL; 
-const VIOLET_IP = '202.155.132.37'; 
-const WEBHOOK_TELEGRAM_PATH = `/telegram-webhook-${BOT_TOKEN.slice(-5)}`; 
+const BOT_TOKEN = process.env.BOT_TOKEN; 
+const PREMIUM_DURATION_DAYS = 30; // Durasi Premium dalam hari
 
-// ====================================================
-// ====== DATABASE LINK (JSON) & MONGODB SETUP ======
-// ====================================================
-
-const DB_FILE = path.join(__dirname, 'links.json');
-let linksDb = {};
-
-function loadDatabase() {
-    try {
-        if (fs.existsSync(DB_FILE)) {
-            const data = fs.readFileSync(DB_FILE, 'utf8');
-            linksDb = JSON.parse(data);
-        } else {
-            linksDb = {}; 
-            fs.writeFileSync(DB_FILE, JSON.stringify(linksDb, null, 2));
-        }
-    } catch (error) {
-        console.error('Gagal memuat database link:', error);
-        linksDb = {};
-    }
+if (!BOT_TOKEN || !VIOLET_API_KEY || !VIOLET_SECRET_KEY) {
+    console.error("❌ ERROR: BOT_TOKEN, VIOLET_API_KEY, atau VIOLET_SECRET_KEY belum diatur di .env");
+    process.exit(1);
 }
 
-function saveDatabase() {
-    try {
-        fs.writeFileSync(DB_FILE, JSON.stringify(linksDb, null, 2));
-    } catch (error) {
-        console.error('Gagal menyimpan database link:', error);
-    }
-}
+const bot = new Telegraf(BOT_TOKEN);
 
-loadDatabase();
-
-// MongoDB Connection with Timeout Fix
+// --- SETUP MONGODB ---
 mongoose.connect(MONGO_URI, {
     serverSelectionTimeoutMS: 30000, 
     socketTimeoutMS: 45000 
 })
-  .then(() => console.log("✅ MongoDB Connected"))
-  .catch(err => console.error("❌ MongoDB Error:", err));
+  .then(() => console.log("✅ MongoDB Connected for Callback Server"))
+  .catch(err => console.error("❌ MongoDB Error for Callback Server:", err));
 
+// --- Mongoose Schema (Harus sama dengan s.js) ---
 const userSchema = new mongoose.Schema({
     userId: { type: Number, required: true, unique: true },
     username: { type: String, default: '' },
@@ -78,373 +46,128 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model("User", userSchema);
 
-
-// ====================================================
-// ====== UTILITY FUNCTIONS (USER LOGIC) ======
-// ====================================================
-
-function isPremium(user) {
-    if (!user || !user.isPremium) return false;
-    if (user.premiumUntil && user.premiumUntil > new Date()) {
-        return true;
-    }
-    if (user.isPremium) {
-         User.updateOne({ userId: user.userId }, { isPremium: false, premiumUntil: null }).catch(console.error);
-    }
-    return false;
-}
-
-// Fungsi internal untuk fetch/create user
-async function _fetchUserAndCreateIfMissing(userId, username) {
-    let user = await User.findOne({ userId });
-
-    if (!user) {
-        const uniqueEmailPlaceholder = `tg_${userId}_${Date.now()}@userbot.co`;
-
-        user = new User({ 
-            userId, 
-            username,
-            email: uniqueEmailPlaceholder 
-        });
-        await user.save();
-    } else if (user.username !== username) {
-        user.username = username;
-        await user.save();
-    }
-    return user;
-}
-
-function generateRandomPhone() {
-    return `081${Math.floor(Math.random() * 900000000) + 100000000}`;
-}
-
-async function shortenUrl(longUrl) {
-    try {
-        const response = await axios.get(`https://tinyurl.com/api-create.php?url=${encodeURIComponent(longUrl)}`);
-        return response.data; 
-    } catch (err) {
-        console.error('Gagal memperpendek URL:', err.message);
-        return longUrl; 
-    }
-}
-
-function isAdmin(ctx) {
-    return ADMIN_IDS.includes(ctx.from.id);
-}
-
-const adminGuard = (ctx, next) => {
-    if (isAdmin(ctx)) {
-        return next();
-    }
-    ctx.reply('❌ Anda tidak memiliki izin Administrator untuk menjalankan perintah ini.');
-};
-
-
-// ----------------------------------------------------
-// ====== MIDDLEWARE STABIL UNTUK MEMUAT DATA USER ======
-// ----------------------------------------------------
-
-async function userLoader(ctx, next) {
-    // Hanya proses pesan dari chat pribadi, dan abaikan jika tidak ada ctx.from
-    if (ctx.from && ctx.chat.type === 'private') {
-        try {
-            const userId = ctx.from.id;
-            const username = ctx.from.username || ctx.from.first_name;
-            // Panggil fungsi untuk memuat/membuat user
-            ctx.state.user = await _fetchUserAndCreateIfMissing(userId, username);
-        } catch (err) {
-            console.error("❌ Middleware Error during userLoader:", err);
-            // Jika database gagal, berikan pesan error yang jelas, JANGAN biarkan bot diam.
-            return ctx.reply('⚠️ Maaf, terjadi masalah saat mengakses database. Mohon coba lagi.');
-        }
-    }
-    return next(); // Lanjutkan ke handler perintah
-}
-
-
-// ====================================================
-// ====== TELEGRAF BOT INITALIZATION & EXPRESS SETUP ======
-// ====================================================
-const bot = new Telegraf(BOT_TOKEN);
+// --- SETUP EXPRESS ---
 const app = express();
+// Gunakan PORT dari environment atau default ke 3000
+const port = process.env.PORT || 3000; 
 
-// Middleware Express
-app.use(express.json());
-app.use(express.urlencoded({ extended: true })); 
+// Middleware untuk parsing body dari POST request (urlencoded)
+app.use(bodyParser.urlencoded({ extended: true }));
 
-// 🚨 Terapkan User Loader di atas semua handler
-bot.use(userLoader); 
+// ====================================================
+// ====== ENDPOINT CALLBACK VIOLET MEDIA PAY ======
+// ====================================================
 
+app.post('/violet-callback', async (req, res) => {
+    // Pastikan CALLBACK_URL Anda menunjuk ke: SERVER_BASE_URL/violet-callback
+    const { 
+        status, // Status pembayaran: sukses, pending, expired, gagal
+        ref_kode, // Ref ID unik yang Anda kirim saat checkout
+        nominal, 
+        signature,
+        pesan_api
+    } = req.body;
 
-// ----------------------------------------------------
-// ====== ENDPOINT 2: TELEGRAM WEBHOOK (FIXED ROUTING) ======
-// ----------------------------------------------------
+    console.log(`[CALLBACK DITERIMA] Status: ${status}, RefID: ${ref_kode}, Nominal: ${nominal}`);
 
-// Menggunakan app.post secara eksplisit untuk Webhook Telegram.
-app.post(WEBHOOK_TELEGRAM_PATH, (req, res) => {
-    bot.handleUpdate(req.body, res); 
-});
-
-
-// ----------------------------------------------------
-// ====== FUNGSI CALLBACK & NOTIFIKASI PEMBAYARAN ======
-// ----------------------------------------------------
-async function sendSuccessNotification(refId, transactionData) {
-    try {
-        const user = await User.findOne({ refId: refId });
-        if (!user) return;
-        const telegramId = user.userId;
-        const premiumDurationDays = 30; 
-        let newExpiryDate = user.premiumUntil && user.premiumUntil > new Date() ? user.premiumUntil : new Date();
-        newExpiryDate.setDate(newExpiryDate.getDate() + premiumDurationDays);
-        await User.updateOne({ userId: telegramId }, { isPremium: true, premiumUntil: newExpiryDate });
-
-        const nominalDisplayed = transactionData.nominal || transactionData.total_amount || '0';
-        const message = `🎉 *PEMBAYARAN SUKSES!* 🎉\n\n` +
-                        `Terima kasih, ${user.username || 'Pengguna'}!\n` +
-                        `💰 Nominal: Rp${parseInt(nominalDisplayed).toLocaleString('id-ID')}\n` +
-                        `🌟 Akses premium Anda diaktifkan hingga: *${newExpiryDate.toLocaleDateString("id-ID")}*.`;
+    // 1. Validasi Signature
+    const signatureString = ref_kode + VIOLET_API_KEY + nominal;
+    const expectedSignature = crypto
+        .createHmac("sha256", VIOLET_SECRET_KEY)
+        .update(signatureString)
+        .digest("hex");
         
-        await bot.telegram.sendMessage(telegramId, message, { parse_mode: 'Markdown' });
-
-    } catch (error) { console.error("❌ Callback: Error saat mengirim notifikasi sukses:", error); }
-}
-
-
-// ----------------------------------------------------
-// ====== ENDPOINT 1: CALLBACK PEMBAYARAN VIOLET (EXPRESS POST) ======
-// ----------------------------------------------------
-
-app.post("/violet-callback", async (req, res) => {
-    const data = req.body;
-    const refid = data.ref || data.ref_kode; 
-    const headerSignature = req.headers['x-callback-signature'];
-    const incomingSignature = headerSignature || data.signature;
-    const clientIp = req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0].trim() : req.ip;
-    
-    try {
-        if (clientIp !== VIOLET_IP) { return res.status(200).send({ status: false, message: "IP Mismatch, ignored." }); }
-        
-        if (!VIOLET_API_KEY || !refid) { return res.status(400).send({ status: false, message: "Missing key or refId" }); }
-        
-        const calculatedSignature = crypto.createHmac("sha256", VIOLET_API_KEY).update(refid).digest("hex");
-        const isSignatureValid = (calculatedSignature === incomingSignature);
-
-        if (isSignatureValid || !incomingSignature) {
-            if (data.status === "success") { await sendSuccessNotification(refid, data); }
-        } else { console.log(`🚫 Signature callback TIDAK VALID!`); }
-
-        res.status(200).send({ status: true, message: "Callback processed" }); 
-    } catch (error) {
-        console.error("❌ Callback Error:", error);
-        res.status(200).send({ status: false, message: "Internal server error" });
-    }
-});
-
-
-// ----------------------------------------------------
-// ====== BOT COMMANDS (LOGIKA TELEGRAM) ======
-// ----------------------------------------------------
-
-const mainKeyboard = Markup.keyboard([
-    ['/buatlink', '/listlink'],
-    ['/premium', '/help']
-]).resize();
-
-bot.start(async (ctx) => {
-    const user = ctx.state.user; // Ambil dari state
-    if (!user) return; // User tidak berhasil dimuat
-    
-    const firstName = user.username || 'Pengguna';
-    ctx.replyWithHTML(
-        `👋 <b>Halo ${firstName}!</b>\n\nSaya adalah bot pelacak keluarga berbasis izin.\n\nGunakan tombol di bawah untuk navigasi cepat.`,
-        mainKeyboard
-    );
-});
-
-bot.command('help', (ctx) => {
-    let message = 
-        `<b>Perintah yang tersedia:</b>\n\n` +
-        `/buatlink &lt;nama&gt;\n  Membuat link pelacakan baru.\n  Contoh: <code>/buatlink Ayah</code>\n\n` +
-        `/listlink\n  Melihat semua link aktif yang telah Anda buat.\n\n` +
-        `/hapuslink &lt;nama&gt;\n  Menghapus link secara manual.\n\n` +
-        `/premium\n  Lihat status Premium dan opsi upgrade.`;
-        
-    if (isAdmin(ctx)) {
-        message += `\n\n👑 <b>Perintah Admin:</b>\n` +
-                   `/addpremium &lt;UserID&gt; &lt;Hari&gt;\n` +
-                   `/listusers\n` +
-                   `/deleteuser &lt;UserID&gt;`;
+    if (signature !== expectedSignature) {
+        console.error(`[VALIDASI GAGAL] Signature tidak cocok untuk RefID: ${ref_kode}`);
+        // Kirim balasan 401 ke VMP
+        return res.status(401).send('Signature Invalid');
     }
 
-    ctx.replyWithHTML(message);
-});
+    // 2. Cek Status Pembayaran
+    if (status !== 'sukses') {
+        // Jika status bukan sukses (misalnya pending, expired, gagal)
+        console.log(`[STATUS TIDAK SUKSES] Pembayaran RefID ${ref_kode} status: ${status}. Pesan: ${pesan_api}`);
+        // Beri tahu VMP bahwa callback sudah diterima (status 200)
+        return res.status(200).send('Callback Received, status is not success'); 
+    }
 
-// Perintah: /buatlink
-bot.command('buatlink', async (ctx) => {
-    const user = ctx.state.user; // Ambil dari state
-    if (!user) return; 
+    // 3. Proses Transaksi Sukses
+    try {
+        // Ambil User ID dari ref_kode (Format: NUXYS:USERNAME:ID:TIMESTAMP)
+        const parts = ref_kode.split(':');
+        const userId = parseInt(parts[2]); // ID ada di index 2
+        
+        // Cek jika ID valid dan nominal cocok (opsional, tapi disarankan)
+        if (isNaN(userId)) {
+            console.error(`[ERROR PARSE ID] Gagal mendapatkan User ID dari RefID: ${ref_kode}`);
+            return res.status(400).send('Invalid Ref ID format');
+        }
+        
+        // Cari user di database
+        const user = await User.findOne({ userId });
 
-    const adminId = user.userId.toString();
-    const isUserPremium = isPremium(user);
-    const userLinks = linksDb[adminId];
-    const currentLinkCount = userLinks ? Object.keys(userLinks).length : 0;
-    
-    if (!isUserPremium && currentLinkCount >= MAX_LINKS_NON_PREMIUM) {
-        return ctx.replyWithMarkdown(
-            `⚠️ *Batas Tercapai!* ⚠️\n\n` +
-            `Anda telah mencapai batas maksimal **${MAX_LINKS_NON_PREMIUM}** link untuk pengguna biasa.\n` +
-            `Silakan hapus link yang ada atau upgrade ke /premium untuk link *tanpa batas*.`
+        if (!user) {
+            console.error(`[ERROR DB] User dengan ID ${userId} tidak ditemukan di DB.`);
+            return res.status(404).send('User Not Found');
+        }
+        
+        // --- LOGIKA PERHITUNGAN TANGGAL PREMIUM ---
+        // Tentukan tanggal kedaluwarsa baru (dari sekarang atau dari sisa waktu premium)
+        let newExpiryDate = user.premiumUntil || new Date();
+        
+        // Jika waktu premium sebelumnya sudah kadaluarsa (atau tidak ada), mulai dari sekarang
+        if (newExpiryDate < new Date()) {
+            newExpiryDate = new Date();
+        }
+        
+        // Tambahkan durasi premium (30 hari)
+        newExpiryDate.setDate(newExpiryDate.getDate() + PREMIUM_DURATION_DAYS);
+        
+        // Perbarui status premium secara atomic
+        await User.updateOne(
+            { userId: userId },
+            { 
+                isPremium: true,
+                premiumUntil: newExpiryDate,
+                // Opsional: Kosongkan refId setelah sukses untuk keamanan
+                refId: null 
+            }
         );
-    }
-    
-    const args = ctx.message.text.split(' '); args.shift(); 
-    const name = args.join(' ').trim();
-
-    if (!name) { return ctx.reply('⚠️ Gagal! Mohon masukkan nama.'); }
-    if (userLinks && userLinks[name]) { return ctx.reply(`⚠️ Link dengan nama [${name}] sudah ada.`); }
-
-    let originalTrackingLink = `${SERVER_BASE_URL}/?alias=${encodeURIComponent(name)}&uid=${adminId}`;
-    let shortenedLink = await shortenUrl(originalTrackingLink); 
-
-    if (!linksDb[adminId]) { linksDb[adminId] = {}; }
-    linksDb[adminId][name] = shortenedLink; saveDatabase();
-
-    ctx.replyWithHTML(
-        `✨ <b>Link berhasil dibuat untuk [${name}]</b>` +
-        (!isUserPremium ? ` (Link ke ${currentLinkCount + 1} dari ${MAX_LINKS_NON_PREMIUM})` : `(👑 Premium)`) +
-        `\n\nBerikan link ini kepadanya. Saat dibuka, Anda akan menerima info lokasi & foto.` +
-        `\n\n🔗 <b>Link:</b>\n<code>${shortenedLink}</code>`, 
-        { disable_web_page_preview: true, ...Markup.inlineKeyboard([Markup.button.callback('🗑️ Hapus Link Ini', `delete:${name}`)]) }
-    );
-});
-
-// Perintah: /listlink
-bot.command('listlink', async (ctx) => {
-    const user = ctx.state.user; // Ambil dari state
-    if (!user) return; 
-    
-    const userLinks = linksDb[user.userId.toString()];
-    if (!userLinks || Object.keys(userLinks).length === 0) { return ctx.reply('Anda belum membuat link apapun.'); }
-    let message = '📋 <b>Daftar Link Aktif Anda:</b>\n\n';
-    for (const name in userLinks) { message += `• <b>${name}</b>:\n  <code>${userLinks[name]}</code>\n`; }
-    ctx.replyWithHTML(message, { disable_web_page_preview: true });
-});
-
-// Perintah: /hapuslink, bot.action
-bot.command('hapuslink', async (ctx) => {
-    const args = ctx.message.text.split(' '); args.shift(); 
-    const name = args.join(' ').trim();
-    if (!name) { return ctx.reply('⚠️ Mohon masukkan nama link yang akan dihapus.'); }
-    if (linksDb[ctx.chat.id] && linksDb[ctx.chat.id][name]) { delete linksDb[ctx.chat.id][name]; saveDatabase(); ctx.reply(`✅ Link untuk [${name}] berhasil dihapus.`); } else { ctx.reply(`❌ Link dengan nama [${name}] tidak ditemukan.`); }
-});
-bot.action(/delete:(.+)/, (ctx) => {
-    const name = ctx.match[1]; const adminId = ctx.chat.id.toString();
-    if (linksDb[adminId] && linksDb[adminId][name]) { delete linksDb[adminId][name]; saveDatabase(); ctx.editMessageText(`✅ Link untuk [${name}] telah dihapus.`); ctx.answerCbQuery('Link berhasil dihapus'); } else { ctx.answerCbQuery('Link tidak ditemukan', { show_alert: true }); }
-});
-
-// Perintah: /premium & checkout logic
-bot.command('premium', async (ctx) => {
-    const user = ctx.state.user; // Ambil dari state
-    if (!user) return; 
-    
-    if (isPremium(user)) { const expiry = user.premiumUntil.toLocaleDateString("id-ID", { year: 'numeric', month: 'long', day: 'numeric' }); return ctx.reply(`👑 Anda sudah Premium!\nPremium Anda berlaku hingga: *${expiry}*.`, { parse_mode: 'Markdown' }); }
-    const premiumMessage = `💳 *Akses Premium Bot Pelacak* 💳\n\nUpgrade ke Premium...\n\n💰 *Harga:* Rp${PREMIUM_PRICE.toLocaleString('id-ID')} (Untuk 30 hari)\nTekan tombol di bawah untuk melakukan pembayaran.`;
-    ctx.reply(premiumMessage, { parse_mode: 'Markdown', ...Markup.inlineKeyboard([Markup.button.callback('Lanjutkan Pembayaran', 'checkout_premium')]) });
-});
-bot.action('checkout_premium', async (ctx) => {
-    // Logika Checkout sama persis
-    await ctx.answerCbQuery('Membuat transaksi...');
-    if (!VIOLET_API_KEY || !VIOLET_SECRET_KEY || !CALLBACK_URL) { return ctx.reply("❌ Konfigurasi Pembayaran tidak lengkap. Hubungi Admin."); }
-    
-    try {
-        const userId = ctx.from.id; const amount = PREMIUM_PRICE.toString(); const ref_kode = `PREMIUM-${userId}-${Date.now()}`;
-        const telegramUsername = ctx.from.username || `tguser_${userId}`; const uniqueEmail = `${telegramUsername}_${Date.now()}@telegram.me`; 
-        const placeholderPhone = generateRandomPhone();
-        const signatureString = ref_kode + VIOLET_API_KEY + amount;
-        const signature = crypto.createHmac("sha256", VIOLET_SECRET_KEY).update(signatureString).digest("hex");
-        const params = new URLSearchParams({ api_key: VIOLET_API_KEY, secret_key: VIOLET_SECRET_KEY, channel_payment: "QRIS", ref_kode: ref_kode, nominal: amount, cus_nama: ctx.from.first_name || "User Telegram", cus_email: uniqueEmail, cus_phone: placeholderPhone, produk: "Akses Premium 30 Hari", url_redirect: SERVER_BASE_URL + '/thanks', url_callback: CALLBACK_URL, expired_time: Math.floor(Date.now() / 1000) + 86400, signature: signature });
         
-        const res = await fetch("https://violetmediapay.com/api/live/create", { method: "POST", body: params });
-        const data = await res.json();
-        
-        if (data.status === true && data.data?.payment_status !== 'Expired') {
-            const info = data.data; 
-            await User.findOneAndUpdate({ userId: userId }, { refId: ref_kode, email: uniqueEmail }, { new: true, upsert: true });
-            ctx.editMessageCaption(`💳 *Pembayaran Premium* 💳\n\n...`, { parse_mode: "Markdown", ...Markup.inlineKeyboard([Markup.button.url('🔗 Bayar Sekarang', info.checkout_url)]) });
-        } else { console.error("Gagal membuat transaksi Violet:", data); ctx.reply(`❌ Gagal membuat link pembayaran: ${data.msg || "Server Error"}`); }
-    } catch (err) { console.error("❌ Error saat checkout premium:", err); ctx.reply("⚠️ Terjadi kesalahan server saat memproses pembayaran."); }
-});
-
-
-// Perintah ADMIN
-bot.command('addpremium', adminGuard, async (ctx) => {
-    // ... Logika Admin sama persis ...
-    const args = ctx.message.text.split(/\s+/); args.shift(); const targetId = parseInt(args[0]); let durationDays = parseInt(args[1]);
-    if (isNaN(targetId) || isNaN(durationDays) || durationDays <= 0) { return ctx.reply('⚠️ Format salah.', { parse_mode: 'Markdown' }); }
-    try {
-        let user = await User.findOne({ userId: targetId });
-        if (!user) { user = new User({ userId: targetId, username: `Manual_${targetId}`, email: `manual_${targetId}_${Date.now()}@bot.co` }); await user.save(); }
-        let newExpiryDate = user.premiumUntil || new Date(); if (newExpiryDate < new Date()) { newExpiryDate = new Date(); }
-        newExpiryDate.setDate(newExpiryDate.getDate() + durationDays);
-        await User.updateOne({ userId: targetId }, { isPremium: true, premiumUntil: newExpiryDate });
+        // --- KIRIM NOTIFIKASI KE PENGGUNA VIA TELEGRAM ---
         const expiryDateString = newExpiryDate.toLocaleDateString("id-ID", { year: 'numeric', month: 'long', day: 'numeric' });
-        ctx.reply(`✅ Premium ditambahkan untuk User ID *${targetId}* selama ${durationDays} hari.\nKedaluwarsa: ${expiryDateString}.`, { parse_mode: 'Markdown' });
-        bot.telegram.sendMessage(targetId, `🎉 Akses Premium Anda telah diaktifkan secara manual oleh Admin hingga *${expiryDateString}*!`, { parse_mode: 'Markdown' }).catch(e => console.error("Gagal kirim notif:", e.message));
-    } catch (error) { console.error("❌ Error /addpremium:", error); ctx.reply(`❌ Gagal memproses: ${error.message}`); }
-});
+        console.log(`[PREMIUM AKTIF] User ${userId} berhasil di-upgrade hingga ${expiryDateString}`);
 
-bot.command('listusers', adminGuard, async (ctx) => {
-    try {
-        const users = await User.find({}).sort({ isPremium: -1, premiumUntil: -1 });
-        let message = '📊 <b>Daftar Semua Pengguna</b> 📊\n\n'; let premiumCount = 0;
-        const displayUsers = users.slice(0, 50);
-        displayUsers.forEach(user => {
-            const status = isPremium(user) ? '👑 PREMIUM' : '👤 Biasa';
-            const expiry = isPremium(user) && user.premiumUntil ? ` (hingga ${user.premiumUntil.toLocaleDateString("id-ID")})` : '';
-            const userIdDisplay = user.userId ? user.userId : 'UNDEFINED_ID'; 
-            const usernameDisplay = user.username && !user.username.startsWith('Manual_') ? `@${user.username}` : 'N/A';
-            message += `[${status}] ID: <code>${userIdDisplay}</code> | ${usernameDisplay}${expiry}\n`; 
-            if (isPremium(user)) premiumCount++; else basicCount++;
-        });
-        message += `\n--- Total: ${users.length} ---\n👑 Premium: ${premiumCount}\n👤 Biasa: ${users.length - premiumCount}`;
-        ctx.reply(message, { parse_mode: 'HTML' }); 
-    } catch (error) { console.error("❌ Error /listusers:", error); ctx.reply(`❌ Gagal mengambil data pengguna: ${error.message}`); }
-});
+        bot.telegram.sendMessage(userId, 
+            `🎉 **Pembayaran Premium Berhasil!** 🎉\n\n` +
+            `Akses Premium Anda telah diaktifkan selama ${PREMIUM_DURATION_DAYS} hari.\n` +
+            `Berlaku hingga: *${expiryDateString}*.\n\n` +
+            `Sekarang Anda bisa menggunakan link pelacakan *tanpa batas*!`, 
+            { parse_mode: 'Markdown' }
+        ).catch(e => console.error(`Gagal kirim notif premium ke ${userId}:`, e.message));
 
-bot.command('deleteuser', adminGuard, async (ctx) => {
-    const args = ctx.message.text.split(/\s+/); args.shift(); const targetId = parseInt(args[0]);
-    if (isNaN(targetId)) { return ctx.reply('⚠️ Format salah.', { parse_mode: 'Markdown' }); }
-    if (targetId === ctx.from.id) { return ctx.reply('❌ Anda tidak dapat menghapus akun Anda sendiri.'); }
-    try {
-        const result = await User.deleteOne({ userId: targetId });
-        const deletedLinks = linksDb[targetId] ? Object.keys(linksDb[targetId]).length : 0;
-        if (linksDb[targetId]) { delete linksDb[targetId]; saveDatabase(); }
-        if (result.deletedCount > 0) { ctx.reply(`✅ Pengguna ID *${targetId}* berhasil dihapus...`, { parse_mode: 'Markdown' }); } else { ctx.reply(`❌ Pengguna ID *${targetId}* tidak ditemukan.`); }
-    } catch (error) { console.error("❌ Error /deleteuser:", error); ctx.reply(`❌ Gagal menghapus pengguna: ${error.message}`); }
-});
+        // WAJIB: Kirim balasan sukses (Status 200 dan 'SUCCESS') ke VMP agar tidak dikirim ulang
+        res.status(200).send('SUCCESS'); 
 
-
-// ----------------------------------------------------
-// ====== SERVER LAUNCH & WEBHOOK SETUP ======
-// ----------------------------------------------------
-
-app.listen(PORT, async () => {
-    console.log(`🚀 Server Express berjalan di port ${PORT}`);
-    
-    if (!SERVER_BASE_URL) {
-        console.error("❌ SERVER_BASE_URL tidak diset! Webhook tidak akan bekerja.");
-        return;
-    }
-    
-    // Set Webhook ke Telegram API
-    const webhookUrl = `${SERVER_BASE_URL}${WEBHOOK_TELEGRAM_PATH}`;
-    
-    try {
-        await bot.telegram.deleteWebhook();
-        await bot.telegram.setWebhook(webhookUrl);
-        console.log(`✅ Telegram Webhook diset ke: ${webhookUrl}`);
-    } catch (e) {
-        console.error("❌ Gagal mengatur Webhook Telegram:", e.message);
+    } catch (error) {
+        console.error("❌ Error saat memproses callback sukses:", error);
+        res.status(500).send('Internal Server Error');
     }
 });
+
+
+// Endpoint Root untuk pemeriksaan status sederhana
+app.get('/', (req, res) => {
+    res.send(`Violet Callback Server berjalan pada port ${port}. Endpoint callback: /violet-callback`);
+});
+
+// ====================================================
+// ====== BOT LAUNCH ======
+// ====================================================
+
+app.listen(port, () => {
+    console.log(`🚀 Callback Server berjalan di http://localhost:${port}`);
+});
+
+process.once('SIGINT', () => process.exit(0));
+process.once('SIGTERM', () => process.exit(0));
