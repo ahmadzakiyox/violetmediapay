@@ -2,15 +2,15 @@ const express = require("express");
 const crypto = require("crypto");
 const mongoose = require("mongoose");
 const { Telegraf } = require("telegraf"); 
+const path = require('path'); 
 
-// Pastikan Anda memanggil require('dotenv').config() di awal file ini
-// jika Anda menggunakan environment variables dari file .env.
+// PENTING: Memastikan environment variables dimuat saat file ini dijalankan
+require("dotenv").config();
 
 const app = express();
 const PORT = process.env.PORT || 3000; 
 
 // --- KONFIGURASI DARI ENVIRONMENT VARIABLES ---
-// Variabel ini harus sama dengan yang di bot utama
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const VIOLET_API_KEY = process.env.VIOLET_API_KEY; 
 const MONGO_URI = process.env.MONGO_URI;
@@ -31,12 +31,12 @@ const userSchema = new mongoose.Schema({
   userId: Number,
   username: String,
   isPremium: { type: Boolean, default: false },
-  refId: String, 
+  // PERBAIKAN: refId memiliki indeks untuk pencarian cepat
+  refId: { type: String, index: true }, 
   premiumUntil: Date,
   email: { type: String, unique: true, sparse: true }
 });
-// Pastikan model User didefinisikan untuk digunakan oleh sendSuccessNotification
-// Menggunakan mongoose.models.User untuk menghindari redefinisi jika file ini di-load berkali-kali
+
 const User = mongoose.models.User || mongoose.model("User", userSchema);
 
 
@@ -138,7 +138,7 @@ app.post("/violet-callback", async (req, res) => {
             return res.status(400).send({ status: false, message: "Missing reference ID" });
         }
 
-        // 3. Pembuatan signature (SESUAI DOKUMENTASI)
+        // 3. Pembuatan signature 
         const calculatedSignature = crypto
             .createHmac("sha256", VIOLET_API_KEY) 
             .update(refid)
