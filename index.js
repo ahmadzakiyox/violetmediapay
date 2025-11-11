@@ -119,28 +119,20 @@ async function sendSuccessNotificationOld(refId, transactionData) {
 }
 
 
-// ====== FUNGSI NOTIFIKASI SUKSES (BOT AUTO-PAYMENT BARU) =====
+// ====== FUNGSI PEMROSESAN BARU (Bot Auto-Payment) =====
 async function sendSuccessNotificationNew(refId, transactionData) {
-    
-    // Fungsi ini HANYA bertanggung jawab memperbarui status transaksi di DB
-    // Bot utama (server.js) yang akan menangani pengiriman produk/saldo
-
     try {
         const nominal = transactionData.nominal || transactionData.total_amount;
         
-        // Cari transaksi PENDING dan update ke SUCCESS
+        // REVISI KRITIS: Cari HANYA berdasarkan refId, dan set status ke SUCCESS
         const updateResult = await TransactionNew.updateOne(
-            { refId: refId, status: 'PENDING' },
+            { refId: refId }, // Kunci pencarian disederhanakan
             { $set: { status: 'SUCCESS', totalBayar: nominal } }
         );
 
-        if (updateResult.modifiedCount === 0) {
-             const existingTx = await TransactionNew.findOne({ refId: refId });
-             if (existingTx && existingTx.status === 'SUCCESS') {
-                 console.log(`✅ [NEW BOT] Transaksi ${refId} sudah SUCCESS. Mengabaikan notifikasi berulang.`);
-                 return;
-             }
-             console.error(`❌ [NEW BOT] Gagal mengupdate transaksi ${refId}.`);
+        // Jika transaksi tidak ditemukan, kita log dan keluar
+        if (updateResult.modifiedCount === 0 && updateResult.matchedCount === 0) {
+             console.error(`❌ [NEW BOT] Transaksi ${refId} TIDAK DITEMUKAN di DB. Server utama mungkin gagal menyimpan.`);
              return;
         }
 
@@ -153,7 +145,6 @@ async function sendSuccessNotificationNew(refId, transactionData) {
         console.error("❌ [NEW BOT] CALLBACK ERROR saat update database Transaction:", error);
     }
 }
-
 
 // GANTI BLOK APP.POST("/VIOLET-CALLBACK", ...) DI BAWAH INI:
 
