@@ -15,9 +15,13 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const MONGO_URI = process.env.MONGO_URI;
 const ADMIN_IDS = process.env.ADMIN_IDS ? process.env.ADMIN_IDS.split(',').map(id => parseInt(id.trim())) : [];
 const PORT = process.env.PORT || 3000; 
-const SERVER_BASE_URL = process.env.SERVER_BASE_URL; 
+
+// Konfigurasi Link & Premium
+const SERVER_BASE_URL = process.env.SERVER_BASE_URL; // URL Publik Heroku
 const MAX_LINKS_NON_PREMIUM = 3; 
 const PREMIUM_PRICE = 10000; 
+
+// Konfigurasi Violet Media Pay
 const VIOLET_API_KEY = process.env.VIOLET_API_KEY;
 const VIOLET_SECRET_KEY = process.env.VIOLET_SECRET_KEY;
 const CALLBACK_URL = process.env.CALLBACK_URL; 
@@ -30,10 +34,33 @@ const WEBHOOK_TELEGRAM_PATH = `/telegram-webhook-${BOT_TOKEN.slice(-5)}`;
 
 const DB_FILE = path.join(__dirname, 'links.json');
 let linksDb = {};
-function loadDatabase() { /* ... */ }
-function saveDatabase() { /* ... */ }
+
+function loadDatabase() {
+    try {
+        if (fs.existsSync(DB_FILE)) {
+            const data = fs.readFileSync(DB_FILE, 'utf8');
+            linksDb = JSON.parse(data);
+        } else {
+            linksDb = {}; 
+            fs.writeFileSync(DB_FILE, JSON.stringify(linksDb, null, 2));
+        }
+    } catch (error) {
+        console.error('Gagal memuat database link:', error);
+        linksDb = {};
+    }
+}
+
+function saveDatabase() {
+    try {
+        fs.writeFileSync(DB_FILE, JSON.stringify(linksDb, null, 2));
+    } catch (error) {
+        console.error('Gagal menyimpan database link:', error);
+    }
+}
+
 loadDatabase();
 
+// MongoDB Connection with Timeout Fix
 mongoose.connect(MONGO_URI, {
     serverSelectionTimeoutMS: 30000, 
     socketTimeoutMS: 45000 
@@ -54,21 +81,64 @@ const User = mongoose.model("User", userSchema);
 // ====================================================
 // ====== UTILITY FUNCTIONS ======
 // ====================================================
-function isPremium(user) { /* ... */ return false; }
+
+function isPremium(user) {
+    if (!user || !user.isPremium) return false;
+    if (user.premiumUntil && user.premiumUntil > new Date()) {
+        return true;
+    }
+    if (user.isPremium) {
+         User.updateOne({ userId: user.userId }, { isPremium: false, premiumUntil: null }).catch(console.error);
+    }
+    return false;
+}
+
+// FIX: Memastikan email unik saat membuat user baru untuk menghindari E11000
 async function getUser(ctx) {
     const userId = ctx.from.id;
+    const username = ctx.from.username || ctx.from.first_name;
     let user = await User.findOne({ userId });
+
     if (!user) {
         const uniqueEmailPlaceholder = `tg_${userId}_${Date.now()}@userbot.co`;
-        user = new User({ userId, username: ctx.from.username || ctx.from.first_name, email: uniqueEmailPlaceholder });
+
+        user = new User({ 
+            userId, 
+            username,
+            email: uniqueEmailPlaceholder 
+        });
+        await user.save();
+    } else if (user.username !== username) {
+        user.username = username;
         await user.save();
     }
     return user;
 }
-function generateRandomPhone() { return `081${Math.floor(Math.random() * 900000000) + 100000000}`; }
-async function shortenUrl(longUrl) { /* ... */ return longUrl; }
-function isAdmin(ctx) { return ADMIN_IDS.includes(ctx.from.id); }
-const adminGuard = (ctx, next) => { if (isAdmin(ctx)) { return next(); } ctx.reply('❌ Anda tidak memiliki izin Administrator.'); };
+
+function generateRandomPhone() {
+    return `081${Math.floor(Math.random() * 900000000) + 100000000}`;
+}
+
+async function shortenUrl(longUrl) {
+    try {
+        const response = await axios.get(`https://tinyurl.com/api-create.php?url=${encodeURIComponent(longUrl)}`);
+        return response.data; 
+    } catch (err) {
+        console.error('Gagal memperpendek URL:', err.message);
+        return longUrl; 
+    }
+}
+
+function isAdmin(ctx) {
+    return ADMIN_IDS.includes(ctx.from.id);
+}
+
+const adminGuard = (ctx, next) => {
+    if (isAdmin(ctx)) {
+        return next();
+    }
+    ctx.reply('❌ Anda tidak memiliki izin Administrator untuk menjalankan perintah ini.');
+};
 
 
 // ====================================================
@@ -86,9 +156,9 @@ app.use(express.urlencoded({ extended: true }));
 // ====== ENDPOINT 2: TELEGRAM WEBHOOK (FIXED ROUTING) ======
 // ----------------------------------------------------
 
-// 🚨 PERBAIKAN KRITIS DI SINI: Gunakan app.post untuk path Webhook yang spesifik.
+// 🚀 PERBAIKAN KRITIS: Menggunakan app.post secara eksplisit untuk Webhook
 app.post(WEBHOOK_TELEGRAM_PATH, (req, res) => {
-    // Telegraf akan memproses body request yang sudah di-parse oleh middleware di atas
+    // Memaksa Express untuk menyerahkan body request ke Telegraf untuk diproses.
     bot.handleUpdate(req.body, res); 
 });
 
@@ -97,7 +167,6 @@ app.post(WEBHOOK_TELEGRAM_PATH, (req, res) => {
 // ====== FUNGSI CALLBACK & NOTIFIKASI PEMBAYARAN ======
 // ----------------------------------------------------
 async function sendSuccessNotification(refId, transactionData) {
-    // ... Logika Notifikasi Sukses sama persis ...
     try {
         const user = await User.findOne({ refId: refId });
         if (!user) return;
@@ -108,7 +177,8 @@ async function sendSuccessNotification(refId, transactionData) {
         await User.updateOne({ userId: telegramId }, { isPremium: true, premiumUntil: newExpiryDate });
 
         const nominalDisplayed = transactionData.nominal || transactionData.total_amount || '0';
-        const message = `🎉 *PEMBAYARAN SUKSES!* 🎉\n\n...` +
+        const message = `🎉 *PEMBAYARAN SUKSES!* 🎉\n\n` +
+                        `Terima kasih, ${user.username || 'Pengguna'}!\n` +
                         `💰 Nominal: Rp${parseInt(nominalDisplayed).toLocaleString('id-ID')}\n` +
                         `🌟 Akses premium Anda diaktifkan hingga: *${newExpiryDate.toLocaleDateString("id-ID")}*.`;
         
@@ -160,12 +230,28 @@ const mainKeyboard = Markup.keyboard([
 
 bot.start(async (ctx) => {
     await getUser(ctx);
-    ctx.replyWithHTML(`👋 <b>Halo ${ctx.from.first_name || 'Pengguna'}!</b>\n\n...`, mainKeyboard);
+    const firstName = ctx.from.first_name || 'Pengguna';
+    ctx.replyWithHTML(
+        `👋 <b>Halo ${firstName}!</b>\n\nSaya adalah bot pelacak keluarga berbasis izin.\n\nGunakan tombol di bawah untuk navigasi cepat.`,
+        mainKeyboard
+    );
 });
 
 bot.command('help', (ctx) => {
-    let message = `<b>Perintah yang tersedia:</b>\n\n...`; 
-    if (isAdmin(ctx)) { message += `\n\n👑 <b>Perintah Admin:</b>\n...`; }
+    let message = 
+        `<b>Perintah yang tersedia:</b>\n\n` +
+        `/buatlink &lt;nama&gt;\n  Membuat link pelacakan baru.\n  Contoh: <code>/buatlink Ayah</code>\n\n` +
+        `/listlink\n  Melihat semua link aktif yang telah Anda buat.\n\n` +
+        `/hapuslink &lt;nama&gt;\n  Menghapus link secara manual.\n\n` +
+        `/premium\n  Lihat status Premium dan opsi upgrade.`;
+        
+    if (isAdmin(ctx)) {
+        message += `\n\n👑 <b>Perintah Admin:</b>\n` +
+                   `/addpremium &lt;UserID&gt; &lt;Hari&gt;\n` +
+                   `/listusers\n` +
+                   `/deleteuser &lt;UserID&gt;`;
+    }
+
     ctx.replyWithHTML(message);
 });
 
@@ -178,7 +264,11 @@ bot.command('buatlink', async (ctx) => {
     const currentLinkCount = userLinks ? Object.keys(userLinks).length : 0;
     
     if (!isUserPremium && currentLinkCount >= MAX_LINKS_NON_PREMIUM) {
-        return ctx.replyWithMarkdown(`⚠️ *Batas Tercapai!* ⚠️\n\n...`);
+        return ctx.replyWithMarkdown(
+            `⚠️ *Batas Tercapai!* ⚠️\n\n` +
+            `Anda telah mencapai batas maksimal **${MAX_LINKS_NON_PREMIUM}** link untuk pengguna biasa.\n` +
+            `Silakan hapus link yang ada atau upgrade ke /premium untuk link *tanpa batas*.`
+        );
     }
     
     const args = ctx.message.text.split(' '); args.shift(); 
@@ -212,7 +302,7 @@ bot.command('listlink', async (ctx) => {
     ctx.replyWithHTML(message, { disable_web_page_preview: true });
 });
 
-// Perintah /hapuslink & bot.action
+// Perintah: /hapuslink, bot.action
 bot.command('hapuslink', async (ctx) => {
     const args = ctx.message.text.split(' '); args.shift(); 
     const name = args.join(' ').trim();
@@ -235,6 +325,7 @@ bot.action('checkout_premium', async (ctx) => {
     // Logika Checkout
     await ctx.answerCbQuery('Membuat transaksi...');
     if (!VIOLET_API_KEY || !VIOLET_SECRET_KEY || !CALLBACK_URL) { return ctx.reply("❌ Konfigurasi Pembayaran tidak lengkap. Hubungi Admin."); }
+    
     try {
         const userId = ctx.from.id; const amount = PREMIUM_PRICE.toString(); const ref_kode = `PREMIUM-${userId}-${Date.now()}`;
         const telegramUsername = ctx.from.username || `tguser_${userId}`; const uniqueEmail = `${telegramUsername}_${Date.now()}@telegram.me`; 
