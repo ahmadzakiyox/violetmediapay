@@ -51,8 +51,11 @@ const app = express();
 // Gunakan PORT dari environment atau default ke 3000
 const port = process.env.PORT || 3000; 
 
-// Middleware untuk parsing body dari POST request (urlencoded)
-app.use(bodyParser.urlencoded({ extended: true }));
+// Middleware untuk parsing body dari POST request
+// ------------------------------------------------------------------
+app.use(bodyParser.urlencoded({ extended: true })); // Untuk form data (standard VMP)
+app.use(bodyParser.json()); // PERBAIKAN: Untuk memastikan JSON body juga terparse
+// ------------------------------------------------------------------
 
 // ====================================================
 // ====== ENDPOINT CALLBACK VIOLET MEDIA PAY ======
@@ -60,13 +63,23 @@ app.use(bodyParser.urlencoded({ extended: true }));
 
 app.post('/violet-callback', async (req, res) => {
     // Pastikan CALLBACK_URL Anda menunjuk ke: SERVER_BASE_URL/violet-callback
+    
+    // Cek dulu apakah body kosong sebelum destructuring
+    if (!req.body || Object.keys(req.body).length === 0) {
+        console.error("❌ [ERROR BODY] Callback diterima, tetapi req.body kosong/undefined.");
+        // Beri respons 400 agar VMP tidak mengulang callback, tapi log error
+        return res.status(400).send('Invalid or Empty Body Received');
+    }
+    
     const { 
         status, // Status pembayaran: sukses, pending, expired, gagal
         ref_kode, // Ref ID unik yang Anda kirim saat checkout
         nominal, 
         signature,
         pesan_api
-    } = req.body;
+    } = req.body; // <-- Error terjadi di sini, kini seharusnya sudah aman
+    
+    // ... (Sisa kode callback, tidak ada perubahan)
 
     console.log(`[CALLBACK DITERIMA] Status: ${status}, RefID: ${ref_kode}, Nominal: ${nominal}`);
 
@@ -79,15 +92,12 @@ app.post('/violet-callback', async (req, res) => {
         
     if (signature !== expectedSignature) {
         console.error(`[VALIDASI GAGAL] Signature tidak cocok untuk RefID: ${ref_kode}`);
-        // Kirim balasan 401 ke VMP
         return res.status(401).send('Signature Invalid');
     }
 
     // 2. Cek Status Pembayaran
     if (status !== 'sukses') {
-        // Jika status bukan sukses (misalnya pending, expired, gagal)
         console.log(`[STATUS TIDAK SUKSES] Pembayaran RefID ${ref_kode} status: ${status}. Pesan: ${pesan_api}`);
-        // Beri tahu VMP bahwa callback sudah diterima (status 200)
         return res.status(200).send('Callback Received, status is not success'); 
     }
 
@@ -97,13 +107,11 @@ app.post('/violet-callback', async (req, res) => {
         const parts = ref_kode.split(':');
         const userId = parseInt(parts[2]); // ID ada di index 2
         
-        // Cek jika ID valid dan nominal cocok (opsional, tapi disarankan)
         if (isNaN(userId)) {
             console.error(`[ERROR PARSE ID] Gagal mendapatkan User ID dari RefID: ${ref_kode}`);
             return res.status(400).send('Invalid Ref ID format');
         }
         
-        // Cari user di database
         const user = await User.findOne({ userId });
 
         if (!user) {
@@ -112,10 +120,8 @@ app.post('/violet-callback', async (req, res) => {
         }
         
         // --- LOGIKA PERHITUNGAN TANGGAL PREMIUM ---
-        // Tentukan tanggal kedaluwarsa baru (dari sekarang atau dari sisa waktu premium)
         let newExpiryDate = user.premiumUntil || new Date();
         
-        // Jika waktu premium sebelumnya sudah kadaluarsa (atau tidak ada), mulai dari sekarang
         if (newExpiryDate < new Date()) {
             newExpiryDate = new Date();
         }
@@ -129,7 +135,6 @@ app.post('/violet-callback', async (req, res) => {
             { 
                 isPremium: true,
                 premiumUntil: newExpiryDate,
-                // Opsional: Kosongkan refId setelah sukses untuk keamanan
                 refId: null 
             }
         );
@@ -146,7 +151,7 @@ app.post('/violet-callback', async (req, res) => {
             { parse_mode: 'Markdown' }
         ).catch(e => console.error(`Gagal kirim notif premium ke ${userId}:`, e.message));
 
-        // WAJIB: Kirim balasan sukses (Status 200 dan 'SUCCESS') ke VMP agar tidak dikirim ulang
+        // WAJIB: Kirim balasan sukses (Status 200 dan 'SUCCESS') ke VMP
         res.status(200).send('SUCCESS'); 
 
     } catch (error) {
