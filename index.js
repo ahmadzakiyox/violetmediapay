@@ -146,7 +146,45 @@ async function sendSuccessNotificationNew(refId, transactionData) {
     }
 }
 
-// GANTI BLOK APP.POST("/VIOLET-CALLBACK", ...) DI BAWAH INI:
+// ====== FUNGSI PEMROSESAN BARU (Bot Auto-Payment) - TANPA RETRY LOOP =====
+async function sendSuccessNotificationNew(refId, transactionData) {
+    try {
+        const nominal = transactionData.nominal || transactionData.total_amount;
+        
+        // REVISI KRITIS: Mengandalkan indeks unik dan operasi $set
+        // Kita tidak bisa menggunakan retry loop karena Anda sudah mencobanya.
+        
+        // Cari dan update status (mungkin transaksi sudah ada)
+        const updateResult = await TransactionNew.updateOne(
+            { refId: refId }, // HANYA mencari berdasarkan ID transaksi
+            { $set: { status: 'SUCCESS', totalBayar: nominal } }
+        );
+
+        if (updateResult.modifiedCount > 0) {
+            console.log(`\n============== CALLBACK SUCCESS LOG (NEW BOT) ==============`);
+            console.log(`✅ [NEW BOT] Transaksi ${refId} berhasil diupdate ke SUCCESS.`);
+            console.log(`==========================================================\n`);
+            return;
+        }
+
+        // Jika tidak ada yang dimodifikasi, cek apakah memang sudah sukses
+        const existingTx = await TransactionNew.findOne({ refId: refId });
+        
+        if (existingTx && existingTx.status === 'SUCCESS') {
+             console.log(`✅ [NEW BOT] Transaksi ${refId} sudah SUCCESS. Mengabaikan notifikasi berulang.`);
+             return;
+        } else if (existingTx && existingTx.status === 'PENDING') {
+             // Jika transaksi masih PENDING, ini adalah anomali langka.
+             console.error(`❌ [NEW BOT] ANOMALI: Transaksi ${refId} DITEMUKAN tetapi gagal diupdate statusnya!`);
+        } else {
+             // Anomali paling parah: Transaksi belum pernah tersimpan oleh server.js.
+             console.error(`❌ [NEW BOT] Gagal total: Transaksi ${refId} TIDAK DITEMUKAN di DB. Server utama gagal menyimpan!`);
+        }
+        
+    } catch (error) {
+        console.error("❌ [NEW BOT] CALLBACK ERROR saat update database Transaction:", error);
+    }
+}
 
 // 🔑 ENDPOINT CALLBACK PUSAT VMP (TERIMA SEMUA DAN PISAHKAN LOGIKA) 🔑
 app.post("/violet-callback", async (req, res) => {
