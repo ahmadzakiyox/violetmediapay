@@ -6,10 +6,9 @@ const bodyParser = require("body-parser");
 require("dotenv").config();
 
 // --- Import Models (Untuk Bot Auto-Payment Baru) ---
-// Note: Kita akan mendefinisikan ulang UserOld dan TransactionNew di sini
-const User = require('./models/User'); // User model for new bot (saldo)
-const Product = require('./models/Product'); // Product model for new bot
-const Transaction = require('./models/Transaction'); // Transaction model for new bot
+const User = require('./models/User'); 
+const Product = require('./models/Product'); 
+const Transaction = require('./models/Transaction'); 
 
 const app = express();
 const PORT = process.env.PORT || 37761; 
@@ -31,7 +30,7 @@ mongoose.connect(MONGO_URI)
 // Inisialisasi Bot untuk mengirim notifikasi
 const bot = new Telegraf(BOT_TOKEN); 
 
-// ====== SCHEMA LAMA & BARU (DIDEFINISIKAN ULANG UNTUK CALLBACK SERVER) ======
+// ====== SCHEMA LAMA & BARU ======
 
 // === SCHEMA LAMA (dari bot premium - Untuk Ref ID NUXYS:) ===
 const userSchemaOld = new mongoose.Schema({
@@ -42,12 +41,10 @@ const userSchemaOld = new mongoose.Schema({
     premiumUntil: Date,
     email: { type: String, unique: true, sparse: true }
 });
-// Pastikan nama model unik jika kedua bot berbagi DB.
-const UserOld = mongoose.models.UserOld || mongoose.model("UserOld", userSchemaOld, "users"); // Asumsi collection lama bernama 'users'
+const UserOld = mongoose.models.UserOld || mongoose.model("UserOld", userSchemaOld, "users"); 
 
 
-// === SCHEMA BARU (menggunakan model yang diimpor, pastikan nama collection benar) ===
-// TransactionNew adalah model Transaction yang diimpor
+// === SCHEMA BARU (menggunakan model yang diimpor) ===
 const TransactionNew = Transaction; 
 
 // ====== HELPER FUNCTIONS (Diperlukan untuk Delivery) ======
@@ -138,7 +135,8 @@ async function sendSuccessNotificationOld(refId, transactionData) {
 async function processNewBotTransaction(refId, data) {
     try {
         const status = data.status.toLowerCase(); 
-        const totalBayarCallback = parseFloat(data.total); 
+        // Menggunakan data.total atau data.nominal karena ini yang tersedia di callback VMP
+        const totalBayarCallback = parseFloat(data.total || data.nominal || 0); 
         
         // 1. Cari Transaksi PENDING di DB
         const transaction = await TransactionNew.findOne({ refId: refId });
@@ -173,7 +171,7 @@ async function processNewBotTransaction(refId, data) {
                 console.log(`✅ [CALLBACK] Status Transaksi ${refId} berhasil diupdate ke SUCCESS.`);
                 
                 // 4. Lakukan Delivery Produk/Top Up
-                const user = await User.findOne({ userId }); // Menggunakan model User (Bot Baru)
+                const user = await User.findOne({ userId }); 
                 if (!user) return console.error(`❌ [CALLBACK] User ${userId} tidak ditemukan untuk delivery.`);
 
                 if (itemType === 'TOPUP') {
@@ -211,15 +209,17 @@ async function processNewBotTransaction(refId, data) {
 app.post("/violet-callback", async (req, res) => {
     
     const data = req.body; 
-    const refid = data.ref_id;
+    
+    // PERBAIKAN KRITIS: Mencari Ref ID di beberapa kemungkinan key (ref_id, ref_kode, ref)
+    const refid = data.ref_id || data.ref_kode || data.ref; 
+    
     const incomingSignature = data.signature;
     
     console.log(`\n--- CALLBACK DITERIMA PUSAT ---`);
     console.log(`Ref ID: ${refid}, Status: ${data.status}`);
     
-    // 1. Verifikasi Signature
+    // 1. Verifikasi Signature (Dibiarkan MD5 seperti yang ada di kode lama Anda)
     const nominal = data.total || data.nominal || '0';
-    // Gunakan formula signature yang benar dari VMP, jika berbeda dari MD5, sesuaikan di sini
     const calculatedSignature = crypto.createHash('md5').update(VIOLET_SECRET_KEY + refid).digest('hex'); 
     
     const isSignatureValid = (incomingSignature === calculatedSignature);
@@ -232,8 +232,9 @@ app.post("/violet-callback", async (req, res) => {
     
     try {
         if (!refid) {
-            console.error("❌ Callback: Nomor referensi (ref_id) tidak ditemukan.");
-            return res.status(400).send({ status: false, message: "Missing reference ID" });
+            console.error("❌ Callback: Nomor referensi (ref_id/ref_kode) tidak ditemukan.");
+            // Mengembalikan status 400 karena permintaan tidak valid (Missing reference ID)
+            return res.status(400).send({ status: false, message: "Missing reference ID" }); 
         }
 
         // --- LOGIKA PEMISAHAN REF ID ---
