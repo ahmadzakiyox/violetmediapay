@@ -135,8 +135,9 @@ async function sendSuccessNotificationOld(refId, transactionData) {
 async function processNewBotTransaction(refId, data) {
     try {
         const status = data.status.toLowerCase(); 
-        // Menggunakan data.total atau data.nominal karena ini yang tersedia di callback VMP
-        const totalBayarCallback = parseFloat(data.total || data.nominal || 0); 
+       // PERBAIKAN: Mencoba total, nominal, atau jumlah
+        const callbackNominalKey = data.total || data.nominal || data.jumlah;
+        const totalBayarCallback = parseFloat(callbackNominalKey || 0);
         
         // 1. Cari Transaksi PENDING di DB
         const transaction = await TransactionNew.findOne({ refId: refId });
