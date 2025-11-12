@@ -7,9 +7,9 @@ require("dotenv").config();
 
 // --- Import Models (Untuk Bot Auto-Payment Baru) ---
 // Note: Kita akan mendefinisikan ulang UserOld dan TransactionNew di sini
-const User = require('./User'); // User model for new bot (saldo)
-const Product = require('./Product'); // Product model for new bot
-const Transaction = require('./Transaction'); // Transaction model for new bot
+const User = require('./models/User'); // User model for new bot (saldo)
+const Product = require('./models/Product'); // Product model for new bot
+const Transaction = require('./models/Transaction'); // Transaction model for new bot
 
 const app = express();
 const PORT = process.env.PORT || 37761; 
