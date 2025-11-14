@@ -161,8 +161,10 @@ app.post("/violet-callback", async (req, res) => {
                               || undefined; 
     
     console.log(`\n--- CALLBACK DITERIMA PUSAT ---`);
+    console.log("FULL PARSED CALLBACK DATA:", data); // <-- OUTPUT 1: Data Lengkap yang Diterima
     console.log(`Ref ID: ${refid}, Status: ${incomingStatus}, Signature Found: ${!!incomingSignature}`);
-
+    console.log(`INCOMING SIGNATURE VALUE: ${incomingSignature}`); // <-- OUTPUT 2: Nilai Akhir Signature
+    
     if (!refid || !incomingStatus) {
         console.error("❌ Callback: Missing essential data (refid atau status).");
         return res.status(400).send({ status: false, message: "Missing essential data" });
@@ -197,7 +199,7 @@ app.post("/violet-callback", async (req, res) => {
                 // 2. Verifikasi Signature HMAC SHA256
                 const nominalDB = transaction.totalBayar; 
                 
-                // 🔑 REVISI 2: Konversi nominalDB menjadi String eksplisit untuk perhitungan yang identik
+                // Konversi nominalDB menjadi String eksplisit
                 const nominalString = String(nominalDB); 
                 
                 // Formula Signature: refId + API_KEY + nominalString
@@ -217,7 +219,14 @@ app.post("/violet-callback", async (req, res) => {
             
             // --- Signature Valid, Lanjutkan Pemrosesan ---
             if (incomingStatus.toLowerCase() === 'success') {
-                await TransactionNew.updateOne({ refId: refid }, { status: 'SUCCESS', vmpSignature: incomingSignature });
+                // Catat signature yang diterima (incomingSignature) ke DB
+                await TransactionNew.updateOne(
+                    { refId: refid }, 
+                    { 
+                        status: 'SUCCESS',
+                        vmpSignature: incomingSignature // <-- MENYIMPAN NILAI SIGNATURE
+                    }
+                );
 
                 if (transaction.produkInfo.type === 'TOPUP') {
                     const nominalDB = transaction.totalBayar;
@@ -273,7 +282,6 @@ app.post("/violet-callback", async (req, res) => {
 });
 
 
-// ====== SERVER LAUNCH ======
 app.listen(PORT, () => {
-    console.log(`🚀 Callback server UDH NIH di port ${PORT}. Url Callback: /violet-callback`);
+    console.log(`🚀 Callback server berjalan di port ${PORT}. Url Callback: /violet-callback`);
 });
