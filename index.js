@@ -8,13 +8,13 @@ const { URLSearchParams } = require('url');
 require("dotenv").config();
 
 // --- Import Models ---
-const User = require('./models/User'); //
-const Product = require('./models/Product'); //
-const Transaction = require('./models/Transaction'); //
+const User = require('./models/User'); 
+const Product = require('./models/Product'); 
+const Transaction = require('./models/Transaction'); 
 
 // --- KONFIGURASI DARI ENVIRONMENT VARIABLES ---
 const BOT_TOKEN_NEW = process.env.BOT_TOKEN; 
-const BOT_TOKEN_OLD = process.env.OLD_BOT_TOKEN; // Wajib diisi
+const BOT_TOKEN_OLD = process.env.OLD_BOT_TOKEN; 
 const VIOLET_API_KEY = process.env.VIOLET_API_KEY; 
 const VIOLET_SECRET_KEY = process.env.VIOLET_SECRET_KEY;
 const MONGO_URI = process.env.MONGO_URI;
@@ -33,13 +33,12 @@ mongoose.connect(MONGO_URI)
 
 const app = express();
 
-// --- Middleware Global: URLENCODED dan JSON (Untuk memastikan body terbaca) ---
+// --- Middleware Global: URLENCODED dan JSON (untuk memastikan body terbaca) ---
 app.use(bodyParser.json()); 
 app.use(bodyParser.urlencoded({ extended: true })); 
 
 
-// ====== SCHEMA LAMA & BARU ======
-// User Old (Bot Premium) - Dapatkan dari file schema lama Anda
+// ====== SCHEMA LAMA & BARU (Disederhanakan) ======
 const userSchemaOld = new mongoose.Schema({
     userId: { type: Number, required: true, unique: true }, 
     username: String,
@@ -49,8 +48,6 @@ const userSchemaOld = new mongoose.Schema({
     email: { type: String, unique: true, sparse: true }
 });
 const UserOld = mongoose.models.UserOld || mongoose.model("UserOld", userSchemaOld, "users"); 
-
-// Transaction New (Bot Auto-Payment)
 const TransactionNew = Transaction; 
 
 
@@ -157,9 +154,9 @@ app.post("/violet-callback", async (req, res) => {
     const refid = data.ref_id || data.ref_kode || data.ref; 
     const incomingStatus = data.status;
     
-    // 💡 REVISI 1: Mencari signature di Body (data.signature) DAN Headers
+    // 💡 FIX LOKASI SIGNATURE: Mencari di Body dan Header X-Callback-Signature (Sesuai Dokumentasi)
     const incomingSignature = data.signature 
-                              || req.headers['x-callback-signature'] 
+                              || req.headers['x-callback-signature'] // <-- Spesifik dari Dokumentasi
                               || req.headers['x-hmac-sha256']
                               || undefined; 
     
@@ -179,12 +176,12 @@ app.post("/violet-callback", async (req, res) => {
 
             if (!transaction) {
                 console.log(`❌ [BOT BARU] Gagal: Transaksi ${refid} TIDAK DITEMUKAN.`);
-                return res.status(200).send({ status: true, message: "Transaction not found" });
+                return res.status(200).send({ "status": true }); // Respon sesuai harapan dokumentasi
             }
 
             if (transaction.status === 'SUCCESS') {
                 console.log(`⚠️ [BOT BARU] Transaksi ${refid} sudah SUCCESS. Abaikan.`);
-                return res.status(200).send({ status: true, message: "Already processed" });
+                return res.status(200).send({ "status": true });
             }
             
             // --- VALIDASI SIGNATURE KETAT UNTUK STATUS SUCCESS ---
@@ -192,15 +189,13 @@ app.post("/violet-callback", async (req, res) => {
                 
                 // 1. Cek Ketersediaan Signature KETAT (Tidak boleh undefined)
                 if (!incomingSignature) {
-                    console.warn(`🚫 [BOT BARU] SECURITY REJECT: Signature HILANG pada status SUCCESS. (MANDATORY)`);
+                    console.warn(`🚫 [BOT BARU] SECURITY REJECT: Signature HILANG pada status SUCCESS.`);
                     await TransactionNew.updateOne({ refId: refid }, { status: 'FAILED' }); 
-                    return res.status(200).send({ status: false, message: "Security failure: Signature is required for SUCCESS status." });
+                    return res.status(200).send({ "status": true }); // Respon sesuai harapan dokumentasi
                 }
 
-                // 2. Verifikasi Signature HMAC SHA256
+                // 2. Verifikasi Signature HMAC SHA256 (Menggunakan Formula Dokumentasi: ref_kode + apikey + nominal)
                 const nominalDB = transaction.totalBayar; 
-                
-                // 🔑 REVISI 2: Konversi nominalDB (Number) menjadi String eksplisit
                 const nominalString = String(nominalDB); 
                 
                 // Formula Signature: refId + API_KEY + nominalString
@@ -214,7 +209,7 @@ app.post("/violet-callback", async (req, res) => {
                 if (calculatedSignature !== incomingSignature) {
                     console.warn(`🚫 [BOT BARU] Signature TIDAK VALID. Transaksi sukses ditolak. Hitungan: ${calculatedSignature}`);
                     await TransactionNew.updateOne({ refId: refid }, { status: 'FAILED' }); 
-                    return res.status(200).send({ status: false, message: "Invalid signature. SUCCESS status rejected." });
+                    return res.status(200).send({ "status": true }); // Respon sesuai harapan dokumentasi
                 }
             }
             
@@ -266,12 +261,12 @@ app.post("/violet-callback", async (req, res) => {
             console.log(`⚠️ Ref ID format tidak dikenali: ${refid}`);
         }
         
-        // --- Wajib mengirim status 200 OK ke VMP ---
-        res.status(200).send({ status: true, message: "Callback received and processed" }); 
+        // --- Wajib mengirim status 200 OK dengan format yang diharapkan ---
+        res.status(200).send({ "status": true }); 
         
     } catch (error) {
         console.error("❌ Callback: Error saat memproses callback:", error);
-        res.status(200).send({ status: false, message: "Internal server error during processing" });
+        res.status(200).send({ "status": true }); // Mengembalikan status sukses agar VMP tidak mencoba ulang
     }
 });
 
