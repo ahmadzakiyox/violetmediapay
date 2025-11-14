@@ -275,5 +275,5 @@ app.post("/violet-callback", async (req, res) => {
 
 // ====== SERVER LAUNCH ======
 app.listen(PORT, () => {
-    console.log(`🚀 Callback server berjalan di port ${PORT}. Url Callback: /violet-callback`);
+    console.log(`🚀 Callback server UDH NIH di port ${PORT}. Url Callback: /violet-callback`);
 });
