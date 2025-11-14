@@ -217,7 +217,7 @@ app.post("/violet-callback", async (req, res) => {
             
             // --- Signature Valid, Lanjutkan Pemrosesan ---
             if (incomingStatus.toLowerCase() === 'success') {
-                await TransactionNew.updateOne({ refId: refid }, { status: 'SUCCESS' });
+                await TransactionNew.updateOne({ refId: refid }, { status: 'SUCCESS', vmpSignature: incomingSignature });
 
                 if (transaction.produkInfo.type === 'TOPUP') {
                     const nominalDB = transaction.totalBayar;
