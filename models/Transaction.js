@@ -14,6 +14,7 @@ const transactionSchema = new mongoose.Schema({
     },
     
     totalBayar: { type: Number, required: true },
+    vmpSignature: { type: String }, // Menyimpan signature yang diterima dari callback
     metodeBayar: { type: String, enum: ['QRIS', 'SALDO'], required: true },
     waktuDibuat: { type: Date, default: Date.now },
 });
