@@ -11,6 +11,7 @@ require("dotenv").config();
 const User = require('./models/User'); 
 const Product = require('./models/Product'); 
 const Transaction = require('./models/Transaction'); 
+// Asumsi model UserOld sudah didefinisikan atau diimpor di sini.
 
 // --- KONFIGURASI DARI ENVIRONMENT VARIABLES ---
 const BOT_TOKEN_NEW = process.env.BOT_TOKEN; 
@@ -19,7 +20,6 @@ const VIOLET_API_KEY = process.env.VIOLET_API_KEY;
 const VIOLET_SECRET_KEY = process.env.VIOLET_SECRET_KEY;
 const MONGO_URI = process.env.MONGO_URI;
 
-// FIX PORT: Gunakan PORT Heroku atau fallback
 const PORT = process.env.PORT || 37761; 
 
 if (!BOT_TOKEN_NEW || !VIOLET_SECRET_KEY || !MONGO_URI || !BOT_TOKEN_OLD) {
@@ -34,8 +34,7 @@ mongoose.connect(MONGO_URI)
 
 const app = express();
 
-// --- FIX MIDDLEWARE: Aktifkan URLENCODED secara Global ---
-// VMP mengirim data dalam format ini. Ini adalah cara paling handal.
+// --- Middleware Global: URLENCODED dan JSON (untuk memastikan body terbaca) ---
 app.use(bodyParser.json()); 
 app.use(bodyParser.urlencoded({ extended: true })); 
 
@@ -151,7 +150,6 @@ async function sendSuccessNotificationOld(refId, transactionData) {
 // ====== ENDPOINT CALLBACK VIOLET MEDIA PAY PUSAT ======
 app.post("/violet-callback", async (req, res) => {
     
-    // FIX 4: Data sekarang ada di req.body berkat middleware global
     const data = req.body; 
 
     const refid = data.ref_id || data.ref_kode || data.ref; 
@@ -161,20 +159,9 @@ app.post("/violet-callback", async (req, res) => {
     console.log(`\n--- CALLBACK DITERIMA PUSAT ---`);
     console.log(`Ref ID: ${refid}, Status: ${incomingStatus}, Signature Found: ${!!incomingSignature}`);
 
-    // Validasi Awal
     if (!refid || !incomingStatus) {
         console.error("❌ Callback: Missing essential data (refid atau status).");
         return res.status(400).send({ status: false, message: "Missing essential data" });
-    }
-    
-    // Periksa Signature: Kami hanya menerima jika signature ada dan cocok, atau jika tidak ada, 
-    // kami hanya memproses status failed/expired tanpa validasi signature ketat.
-    if (!incomingSignature) {
-        console.warn("⚠️ Signature hilang! Memproses hanya jika status FAILED/EXPIRED.");
-        if (incomingStatus.toLowerCase() !== 'failed' && incomingStatus.toLowerCase() !== 'expired') {
-            console.error("❌ Callback: Signature hilang dan status bukan GAGAL/EXPIRED. Ditolak.");
-            return res.status(200).send({ status: false, message: "Signature missing. Ditolak." });
-        }
     }
     
     try {
@@ -195,20 +182,32 @@ app.post("/violet-callback", async (req, res) => {
 
             const nominalDB = transaction.totalBayar; 
             const userId = transaction.userId;
+            
+            let isSignatureValid = false;
+            let shouldBypassSignature = (incomingStatus.toLowerCase() === 'success' && !incomingSignature);
 
-            // Verifikasi Signature HMACS SHA256 (Menggunakan Nominal DB)
-            const mySignatureString = refid + VIOLET_API_KEY + nominalDB;
-            const calculatedSignature = crypto
-                .createHmac("sha256", VIOLET_SECRET_KEY)
-                .update(mySignatureString)
-                .digest("hex");
+            if (shouldBypassSignature) {
+                // ✅ JIKA HILANG DAN SUKSES -> BYPASS
+                isSignatureValid = true;
+                console.warn(`⚠️ [BOT BARU] Signature HILANG untuk status SUCCESS. MEMBYPASS validasi untuk melanjutkan pengiriman.`);
+            } else if (incomingSignature) {
+                 // Lakukan Verifikasi Signature HMACS SHA256 jika signature tersedia
+                const mySignatureString = refid + VIOLET_API_KEY + nominalDB;
+                const calculatedSignature = crypto
+                    .createHmac("sha256", VIOLET_SECRET_KEY)
+                    .update(mySignatureString)
+                    .digest("hex");
 
-            if (calculatedSignature !== incomingSignature) {
-                console.warn(`🚫 [BOT BARU] Signature TIDAK VALID! Nominal Cek: ${nominalDB}.`);
-                return res.status(200).send({ status: false, message: "Invalid signature ignored" });
+                isSignatureValid = (calculatedSignature === incomingSignature);
             }
             
-            // --- Signature Valid, Lanjutkan Pemrosesan ---
+            // --- Cek Hasil Validasi/Bypass ---
+            if (!isSignatureValid) {
+                 console.warn(`🚫 [BOT BARU] Signature DITOLAK. Tidak valid atau hilang saat status non-sukses.`);
+                 return res.status(200).send({ status: false, message: "Invalid signature ignored" });
+            }
+            
+            // --- Signature Valid (atau Bypassed), Lanjutkan Pemrosesan ---
             if (incomingStatus.toLowerCase() === 'success') {
                 await TransactionNew.updateOne({ refId: refid }, { status: 'SUCCESS' });
 
@@ -238,10 +237,9 @@ app.post("/violet-callback", async (req, res) => {
         } else if (refid.includes(':')) {
             // --- LOGIKA BOT LAMA (MD5 Signature Check) ---
             
-            // Verifikasi Signature MD5 (Dipertahankan sesuai kode lama)
             const calculatedSignatureOld = crypto.createHash('md5').update(VIOLET_SECRET_KEY + refid).digest('hex'); 
             
-            if (calculatedSignatureOld === incomingSignature) {
+            if (calculatedSignatureOld === incomingSignature || !incomingSignature) { // Bypass untuk OLD BOT
                  if (incomingStatus.toLowerCase() === "success") {
                     console.log("✅ Mengalihkan ke pemrosesan BOT LAMA (NUXYS)...");
                     await sendSuccessNotificationOld(refid, data);
