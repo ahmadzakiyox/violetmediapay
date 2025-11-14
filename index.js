@@ -11,7 +11,6 @@ require("dotenv").config();
 const User = require('./models/User'); 
 const Product = require('./models/Product'); 
 const Transaction = require('./models/Transaction'); 
-// Asumsi model UserOld sudah didefinisikan atau diimpor di sini.
 
 // --- KONFIGURASI DARI ENVIRONMENT VARIABLES ---
 const BOT_TOKEN_NEW = process.env.BOT_TOKEN; 
@@ -34,12 +33,12 @@ mongoose.connect(MONGO_URI)
 
 const app = express();
 
-// --- Middleware Global: URLENCODED dan JSON (untuk memastikan body terbaca) ---
+// --- Middleware Global: URLENCODED dan JSON (Untuk memastikan body terbaca) ---
 app.use(bodyParser.json()); 
 app.use(bodyParser.urlencoded({ extended: true })); 
 
 
-// ====== SCHEMA LAMA & BARU (Disederhanakan) ======
+// ====== SCHEMA LAMA & BARU ======
 const userSchemaOld = new mongoose.Schema({
     userId: { type: Number, required: true, unique: true }, 
     username: String,
@@ -154,7 +153,12 @@ app.post("/violet-callback", async (req, res) => {
 
     const refid = data.ref_id || data.ref_kode || data.ref; 
     const incomingStatus = data.status;
-    const incomingSignature = data.signature;
+    
+    // 💡 REVISI 1: Mencari signature di Body (data.signature) DAN Headers
+    const incomingSignature = data.signature 
+                              || req.headers['x-callback-signature'] 
+                              || req.headers['x-hmac-sha256']
+                              || undefined; 
     
     console.log(`\n--- CALLBACK DITERIMA PUSAT ---`);
     console.log(`Ref ID: ${refid}, Status: ${incomingStatus}, Signature Found: ${!!incomingSignature}`);
@@ -166,7 +170,7 @@ app.post("/violet-callback", async (req, res) => {
     
     try {
         if (refid.startsWith('PROD-') || refid.startsWith('TOPUP-')) {
-            // --- LOGIKA BOT BARU (HMAC SHA256 & DB NOMINAL CHECK) ---
+            // --- LOGIKA BOT BARU (HMAC SHA256 & STRICT CHECK) ---
             
             const transaction = await TransactionNew.findOne({ refId: refid });
 
@@ -179,59 +183,64 @@ app.post("/violet-callback", async (req, res) => {
                 console.log(`⚠️ [BOT BARU] Transaksi ${refid} sudah SUCCESS. Abaikan.`);
                 return res.status(200).send({ status: true, message: "Already processed" });
             }
-
-            const nominalDB = transaction.totalBayar; 
-            const userId = transaction.userId;
             
-            let isSignatureValid = false;
-            let shouldBypassSignature = (incomingStatus.toLowerCase() === 'success' && !incomingSignature);
+            // --- VALIDASI SIGNATURE KETAT UNTUK STATUS SUCCESS ---
+            if (incomingStatus.toLowerCase() === 'success') {
+                
+                // 1. Cek Ketersediaan Signature KETAT
+                if (!incomingSignature) {
+                    console.warn(`🚫 [BOT BARU] SECURITY REJECT: Signature HILANG pada status SUCCESS.`);
+                    await TransactionNew.updateOne({ refId: refid }, { status: 'FAILED' }); 
+                    return res.status(200).send({ status: false, message: "Security failure: Signature is required for SUCCESS status." });
+                }
 
-            if (shouldBypassSignature) {
-                // ✅ JIKA HILANG DAN SUKSES -> BYPASS
-                isSignatureValid = true;
-                console.warn(`⚠️ [BOT BARU] Signature HILANG untuk status SUCCESS. MEMBYPASS validasi untuk melanjutkan pengiriman.`);
-            } else if (incomingSignature) {
-                 // Lakukan Verifikasi Signature HMACS SHA256 jika signature tersedia
-                const mySignatureString = refid + VIOLET_API_KEY + nominalDB;
+                // 2. Verifikasi Signature HMAC SHA256
+                const nominalDB = transaction.totalBayar; 
+                
+                // 🔑 REVISI 2: Konversi nominalDB menjadi String eksplisit untuk perhitungan yang identik
+                const nominalString = String(nominalDB); 
+                
+                // Formula Signature: refId + API_KEY + nominalString
+                const mySignatureString = refid + VIOLET_API_KEY + nominalString; 
+                
                 const calculatedSignature = crypto
                     .createHmac("sha256", VIOLET_SECRET_KEY)
                     .update(mySignatureString)
                     .digest("hex");
 
-                isSignatureValid = (calculatedSignature === incomingSignature);
+                if (calculatedSignature !== incomingSignature) {
+                    console.warn(`🚫 [BOT BARU] Signature TIDAK VALID. Transaksi sukses ditolak. Hitungan: ${calculatedSignature}`);
+                    await TransactionNew.updateOne({ refId: refid }, { status: 'FAILED' }); 
+                    return res.status(200).send({ status: false, message: "Invalid signature. SUCCESS status rejected." });
+                }
             }
             
-            // --- Cek Hasil Validasi/Bypass ---
-            if (!isSignatureValid) {
-                 console.warn(`🚫 [BOT BARU] Signature DITOLAK. Tidak valid atau hilang saat status non-sukses.`);
-                 return res.status(200).send({ status: false, message: "Invalid signature ignored" });
-            }
-            
-            // --- Signature Valid (atau Bypassed), Lanjutkan Pemrosesan ---
+            // --- Signature Valid, Lanjutkan Pemrosesan ---
             if (incomingStatus.toLowerCase() === 'success') {
                 await TransactionNew.updateOne({ refId: refid }, { status: 'SUCCESS' });
 
                 if (transaction.produkInfo.type === 'TOPUP') {
-                    await User.updateOne({ userId }, { $inc: { saldo: nominalDB, totalTransaksi: 1 } });
-                    const updatedUser = await User.findOne({ userId });
+                    const nominalDB = transaction.totalBayar;
+                    await User.updateOne({ userId: transaction.userId }, { $inc: { saldo: nominalDB, totalTransaksi: 1 } });
+                    const updatedUser = await User.findOne({ userId: transaction.userId });
                     
-                    await sendTelegramMessage(BOT_TOKEN_NEW, userId, 
+                    await sendTelegramMessage(BOT_TOKEN_NEW, transaction.userId, 
                         `🎉 **Top Up Saldo Berhasil!**\nSaldo kini: Rp ${updatedUser.saldo.toLocaleString('id-ID')}.`);
                     
                 } else if (transaction.produkInfo.type === 'PRODUCT') {
                     const productData = await Product.findOne({ namaProduk: transaction.produkInfo.namaProduk }).select('_id');
                     if (productData) {
-                        await deliverProduct(userId, productData._id); 
-                        await User.updateOne({ userId }, { $inc: { totalTransaksi: 1 } });
+                        await deliverProduct(transaction.userId, productData._id); 
+                        await User.updateOne({ userId: transaction.userId }, { $inc: { totalTransaksi: 1 } });
                     } else {
-                        await sendTelegramMessage(BOT_TOKEN_NEW, userId, `⚠️ Produk ${transaction.produkInfo.namaProduk} tidak ditemukan saat delivery. Hubungi admin.`);
+                        await sendTelegramMessage(BOT_TOKEN_NEW, transaction.userId, `⚠️ Produk ${transaction.produkInfo.namaProduk} tidak ditemukan saat delivery. Hubungi admin.`);
                     }
                 }
                 console.log(`✅ [BOT BARU] Transaksi ${refid} berhasil diupdate ke SUCCESS.`);
 
             } else if (incomingStatus.toLowerCase() === 'failed' || incomingStatus.toLowerCase() === 'expired') {
                 await TransactionNew.updateOne({ refId: refid, status: 'PENDING' }, { status: incomingStatus.toUpperCase() });
-                await sendTelegramMessage(BOT_TOKEN_NEW, userId, `❌ **Transaksi Gagal/Dibatalkan:** Pembayaran Anda berstatus **${incomingStatus.toUpperCase()}**.`, true);
+                await sendTelegramMessage(BOT_TOKEN_NEW, transaction.userId, `❌ **Transaksi Gagal/Dibatalkan:** Pembayaran Anda berstatus **${incomingStatus.toUpperCase()}**.`, true);
             }
             
         } else if (refid.includes(':')) {
@@ -239,7 +248,7 @@ app.post("/violet-callback", async (req, res) => {
             
             const calculatedSignatureOld = crypto.createHash('md5').update(VIOLET_SECRET_KEY + refid).digest('hex'); 
             
-            if (calculatedSignatureOld === incomingSignature || !incomingSignature) { // Bypass untuk OLD BOT
+            if (calculatedSignatureOld === incomingSignature || !incomingSignature) { // Mempertahankan Bypass untuk OLD BOT
                  if (incomingStatus.toLowerCase() === "success") {
                     console.log("✅ Mengalihkan ke pemrosesan BOT LAMA (NUXYS)...");
                     await sendSuccessNotificationOld(refid, data);
