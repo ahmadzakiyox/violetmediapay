@@ -1,38 +1,44 @@
 const express = require("express");
 const crypto = require("crypto");
 const mongoose = require("mongoose");
-const { Telegraf } = require("telegraf"); 
 const bodyParser = require("body-parser");
+const fetch = require('node-fetch'); // Digunakan untuk kirim pesan API
+const { URLSearchParams } = require('url');
+
 require("dotenv").config();
 
 // --- Import Models (Untuk Bot Auto-Payment Baru) ---
-const User = require('./models/User'); 
-const Product = require('./models/Product'); 
-const Transaction = require('./models/Transaction'); 
-
-const app = express();
-const PORT = process.env.PORT || 37761; 
-
-// Middleware untuk parsing body dari callback VMP
-app.use(bodyParser.urlencoded({ extended: true })); 
-app.use(bodyParser.json()); 
+const User = require('./models/User'); //
+const Product = require('./models/Product'); //
+const Transaction = require('./models/Transaction'); //
 
 // --- KONFIGURASI DARI ENVIRONMENT VARIABLES ---
-const BOT_TOKEN = process.env.BOT_TOKEN;
+const BOT_TOKEN_NEW = process.env.BOT_TOKEN; // Asumsi ini adalah token untuk bot baru
+const BOT_TOKEN_OLD = process.env.OLD_BOT_TOKEN; // Tambahkan ini di .env untuk bot lama
+const VIOLET_API_KEY = process.env.VIOLET_API_KEY; 
 const VIOLET_SECRET_KEY = process.env.VIOLET_SECRET_KEY;
 const MONGO_URI = process.env.MONGO_URI;
+
+// FIX PORT: Gunakan PORT Heroku atau fallback
+const PORT = process.env.PORT || 37761; 
+
+if (!BOT_TOKEN_NEW || !VIOLET_SECRET_KEY || !MONGO_URI) {
+    console.error("❌ ERROR: Pastikan variabel environment penting terisi.");
+    process.exit(1);
+}
 
 // ====== KONEKSI DATABASE ======
 mongoose.connect(MONGO_URI)
   .then(() => console.log("✅ Callback Server: MongoDB Connected"))
   .catch(err => console.error("❌ Callback Server: MongoDB Error:", err));
 
-// Inisialisasi Bot untuk mengirim notifikasi
-const bot = new Telegraf(BOT_TOKEN); 
+const app = express();
+app.use(bodyParser.urlencoded({ extended: true })); 
+app.use(bodyParser.json()); 
+
 
 // ====== SCHEMA LAMA & BARU ======
-
-// === SCHEMA LAMA (dari bot premium - Untuk Ref ID NUXYS:) ===
+// === SCHEMA LAMA (Bot Premium) ===
 const userSchemaOld = new mongoose.Schema({
     userId: { type: Number, required: true, unique: true }, 
     username: String,
@@ -41,20 +47,42 @@ const userSchemaOld = new mongoose.Schema({
     premiumUntil: Date,
     email: { type: String, unique: true, sparse: true }
 });
+// Pastikan nama koleksi sesuai dengan bot lama Anda
 const UserOld = mongoose.models.UserOld || mongoose.model("UserOld", userSchemaOld, "users"); 
-
-
-// === SCHEMA BARU (menggunakan model yang diimpor) ===
 const TransactionNew = Transaction; 
 
-// ====== HELPER FUNCTIONS (Diperlukan untuk Delivery) ======
+// ====================================================
+// ====== UTILITY FUNCTIONS (Direct API Messaging) ======
+// ====================================================
 
-// Fungsi untuk mengirim produk (Diambil dari bot.js)
+/**
+ * Mengirim pesan ke Telegram menggunakan API langsung tanpa instance Telegraf.
+ */
+async function sendTelegramMessage(token, userId, message, isMarkdown = true) {
+    if (!token) {
+        console.error(`❌ Gagal mengirim pesan: Token bot tidak ditemukan untuk user ${userId}.`);
+        return;
+    }
+    const url = `https://api.telegram.org/bot${token}/sendMessage`;
+    const params = new URLSearchParams({
+        chat_id: userId,
+        text: message,
+        parse_mode: isMarkdown ? 'Markdown' : 'HTML',
+    });
+    
+    try {
+        await fetch(url, { method: 'POST', body: params });
+    } catch (e) {
+        console.error(`❌ Gagal kirim notifikasi ke user ${userId}:`, e.message);
+    }
+}
+
+// Fungsi untuk mengirim produk (Diperbarui menggunakan sendTelegramMessage)
 async function deliverProduct(userId, productId) {
     try {
         const product = await Product.findById(productId);
         if (!product || product.kontenProduk.length <= 0) {
-            bot.telegram.sendMessage(userId, '⚠️ Produk yang Anda beli kehabisan stok setelah pembayaran. Silakan hubungi admin.', { parse_mode: 'Markdown' });
+            await sendTelegramMessage(BOT_TOKEN_NEW, userId, '⚠️ Produk yang Anda beli kehabisan stok setelah pembayaran. Silakan hubungi admin.');
             return false;
         }
 
@@ -65,16 +93,15 @@ async function deliverProduct(userId, productId) {
             $inc: { stok: -1, totalTerjual: 1 } 
         });
         
-        bot.telegram.sendMessage(userId, 
+        await sendTelegramMessage(BOT_TOKEN_NEW, userId, 
             `🎉 **Pembayaran Sukses! Produk Telah Dikirim!**\n\n` +
             `**Produk:** ${product.namaProduk}\n` +
-            `**Konten Anda:**\n\`${key}\``, 
-            { parse_mode: 'Markdown' }
-        );
+            `**Konten Anda:**\n\`${key}\``);
+            
         return true;
     } catch (error) {
         console.error(`❌ Gagal deliver produk ke user ${userId} di callback:`, error);
-        bot.telegram.sendMessage(userId, '❌ Terjadi kesalahan saat mengirim produk Anda. Silakan hubungi admin.', { parse_mode: 'Markdown' });
+        await sendTelegramMessage(BOT_TOKEN_NEW, userId, '❌ Terjadi kesalahan saat mengirim produk Anda. Silakan hubungi admin.');
         return false;
     }
 }
@@ -84,7 +111,6 @@ async function deliverProduct(userId, productId) {
 async function sendSuccessNotificationOld(refId, transactionData) {
     
     const refIdParts = refId.split(':');
-    const telegramUsername = refIdParts[1] || 'UnknownUser'; 
     const telegramId = parseInt(refIdParts[2]);
 
     if (isNaN(telegramId)) {
@@ -100,7 +126,6 @@ async function sendSuccessNotificationOld(refId, transactionData) {
              return;
         } 
         
-        // --- UPDATE STATUS PREMIUM ---
         const premiumDurationDays = 30; 
         let newExpiryDate = user.premiumUntil || new Date();
         if (newExpiryDate < new Date()) {
@@ -113,95 +138,16 @@ async function sendSuccessNotificationOld(refId, transactionData) {
             { isPremium: true, premiumUntil: newExpiryDate, refId: refId }
         );
         
-        console.log(`\n============== CALLBACK SUCCESS LOG (OLD BOT) ==============`);
-        console.log(`✅ User ${telegramId} | ${telegramUsername} TELAH DI-SET PREMIUM!`);
-        console.log(`==========================================================\n`);
-
         const nominalDisplayed = transactionData.total || transactionData.nominal || '0';
         const message = `🎉 *PEMBAYARAN SUKSES!* 🎉\n\n` +
                          `📦 Produk: Akses Premium\n` +
                          `💰 Nominal: Rp${parseInt(nominalDisplayed).toLocaleString('id-ID')}\n` +
                          `🌟 Akses premium Anda diaktifkan hingga: *${newExpiryDate.toLocaleDateString("id-ID")}*.`;
         
-        await bot.telegram.sendMessage(telegramId, message, { parse_mode: 'Markdown' }).catch(e => console.error("Gagal kirim notif premium:", e.message));
+        await sendTelegramMessage(BOT_TOKEN_OLD, telegramId, message);
         
     } catch (error) {
         console.error("❌ CALLBACK ERROR saat memproses/update database OLD BOT:", error);
-    }
-}
-
-
-// FUNGSI INTI UNTUK MEMPROSES CALLBACK TRANSAKSI BARU (PROD/TOPUP)
-async function processNewBotTransaction(refId, data) {
-    try {
-        const status = data.status.toLowerCase(); 
-       // PERBAIKAN: Mencoba total, nominal, atau jumlah
-        const callbackNominalKey = data.total || data.nominal || data.jumlah;
-        const totalBayarCallback = parseFloat(callbackNominalKey || 0);
-        
-        // 1. Cari Transaksi PENDING di DB
-        const transaction = await TransactionNew.findOne({ refId: refId });
-
-        if (!transaction) {
-            console.log(`❌ [CALLBACK] Gagal: Transaksi ${refId} TIDAK DITEMUKAN.`);
-            return;
-        }
-
-        if (transaction.status === 'SUCCESS') {
-            console.log(`⚠️ [CALLBACK] Transaksi ${refId} sudah SUCCESS. Abaikan.`);
-            return;
-        }
-
-        const userId = transaction.userId;
-        const itemType = transaction.produkInfo.type;
-
-        if (status === 'success') {
-            
-            // 2. Pastikan jumlah pembayaran sesuai
-            if (totalBayarCallback !== transaction.totalBayar) {
-                console.log(`⚠️ [CALLBACK] Jumlah pembayaran tidak sesuai. DB: ${transaction.totalBayar}, Callback: ${totalBayarCallback}.`);
-                await TransactionNew.updateOne({ refId }, { status: 'FAILED' });
-                bot.telegram.sendMessage(userId, `❌ **Pembayaran Gagal:** Jumlah yang dibayarkan tidak sesuai (Ref: ${refId}).`, { parse_mode: 'Markdown' });
-                return;
-            }
-
-            // 3. Update Status ke SUCCESS
-            const updateResult = await TransactionNew.updateOne({ refId, status: 'PENDING' }, { status: 'SUCCESS' });
-
-            if (updateResult.modifiedCount > 0) {
-                console.log(`✅ [CALLBACK] Status Transaksi ${refId} berhasil diupdate ke SUCCESS.`);
-                
-                // 4. Lakukan Delivery Produk/Top Up
-                const user = await User.findOne({ userId }); 
-                if (!user) return console.error(`❌ [CALLBACK] User ${userId} tidak ditemukan untuk delivery.`);
-
-                if (itemType === 'TOPUP') {
-                    user.saldo += transaction.totalBayar;
-                    user.totalTransaksi += 1;
-                    await user.save();
-                    
-                    bot.telegram.sendMessage(userId, 
-                        `🎉 **Top Up Berhasil!**\nSaldo kini: Rp ${user.saldo.toLocaleString('id-ID')}.`, 
-                        { parse_mode: 'Markdown' }
-                    );
-                    
-                } else if (itemType === 'PRODUCT') {
-                    const productData = await Product.findOne({ namaProduk: transaction.produkInfo.namaProduk }).select('_id');
-                    if (productData) {
-                        await deliverProduct(userId, productData._id); 
-                    } else {
-                        bot.telegram.sendMessage(userId, `⚠️ Produk ${transaction.produkInfo.namaProduk} tidak ditemukan saat delivery. Hubungi admin.`, { parse_mode: 'Markdown' });
-                    }
-                }
-            } 
-
-        } else if (status === 'failed' || status === 'expired') {
-            await TransactionNew.updateOne({ refId, status: 'PENDING' }, { status: status.toUpperCase() });
-            bot.telegram.sendMessage(userId, `❌ **Transaksi Gagal/Dibatalkan:** Pembayaran Anda berstatus **${status.toUpperCase()}**.`, { parse_mode: 'Markdown' });
-        }
-
-    } catch (error) {
-        console.error(`❌ [CALLBACK ERROR] Gagal memproses transaksi ${refId}:`, error);
     }
 }
 
@@ -211,53 +157,97 @@ app.post("/violet-callback", async (req, res) => {
     
     const data = req.body; 
     
-    // PERBAIKAN KRITIS: Mencari Ref ID di beberapa kemungkinan key (ref_id, ref_kode, ref)
+    // Pastikan ini adalah parser x-www-form-urlencoded
     const refid = data.ref_id || data.ref_kode || data.ref; 
-    
+    const incomingStatus = data.status;
     const incomingSignature = data.signature;
     
     console.log(`\n--- CALLBACK DITERIMA PUSAT ---`);
-    console.log(`Ref ID: ${refid}, Status: ${data.status}`);
-    
-    // 1. Verifikasi Signature (Dibiarkan MD5 seperti yang ada di kode lama Anda)
-    const nominal = data.total || data.nominal || '0';
-    const calculatedSignature = crypto.createHash('md5').update(VIOLET_SECRET_KEY + refid).digest('hex'); 
-    
-    const isSignatureValid = (incomingSignature === calculatedSignature);
-    const shouldBypassSignature = !incomingSignature || incomingSignature.length < 5; 
+    console.log(`Ref ID: ${refid}, Status: ${incomingStatus}`);
 
-    if (!isSignatureValid && !shouldBypassSignature) {
-        console.log(`🚫 Signature callback TIDAK VALID! Mengabaikan.`);
-        return res.status(200).send({ status: false, message: "Invalid signature ignored" });
+    if (!refid || !incomingStatus || !incomingSignature) {
+        console.error("❌ Callback: Missing essential data (refid, status, or signature).");
+        return res.status(400).send({ status: false, message: "Missing essential data" });
     }
     
     try {
-        if (!refid) {
-            console.error("❌ Callback: Nomor referensi (ref_id/ref_kode) tidak ditemukan.");
-            // Mengembalikan status 400 karena permintaan tidak valid (Missing reference ID)
-            return res.status(400).send({ status: false, message: "Missing reference ID" }); 
-        }
+        if (refid.startsWith('PROD-') || refid.startsWith('TOPUP-')) {
+            // --- LOGIKA BOT BARU (HMAC SHA256 & DB NOMINAL CHECK) ---
+            
+            const transaction = await TransactionNew.findOne({ refId: refid });
 
-        // --- LOGIKA PEMISAHAN REF ID ---
-        if (data.status === "success") {
-            if (refid.startsWith('PROD-') || refid.startsWith('TOPUP-')) {
-                // FORMAT BARU (Bot Auto Payment)
-                console.log("✅ Mengalihkan ke pemrosesan BOT BARU (PROD/TOPUP)...");
-                await processNewBotTransaction(refid, data);
-            } else if (refid.includes(':')) {
-                // FORMAT LAMA (Bot Premium, misal: NUXYS:user:id:ts)
-                console.log("✅ Mengalihkan ke pemrosesan BOT LAMA (NUXYS)...");
-                await sendSuccessNotificationOld(refid, data);
-            } else {
-                console.log(`⚠️ Ref ID format tidak dikenali: ${refid}`);
+            if (!transaction) {
+                console.log(`❌ [BOT BARU] Gagal: Transaksi ${refid} TIDAK DITEMUKAN.`);
+                return res.status(200).send({ status: true, message: "Transaction not found" });
             }
-        } else if (refid && data.status) {
-             // Tangani status FAILED/EXPIRED untuk BOT BARU
-             if (refid.startsWith('PROD-') || refid.startsWith('TOPUP-')) {
-                 await processNewBotTransaction(refid, data);
-             } else {
-                 console.log(`⚠️ Status callback non-sukses diterima untuk Ref ID lama/tidak dikenal: ${data.status} (Ref: ${refid})`);
-             }
+
+            if (transaction.status === 'SUCCESS') {
+                console.log(`⚠️ [BOT BARU] Transaksi ${refid} sudah SUCCESS. Abaikan.`);
+                return res.status(200).send({ status: true, message: "Already processed" });
+            }
+
+            const nominalDB = transaction.totalBayar; 
+            const userId = transaction.userId;
+
+            // Verifikasi Signature HMACS SHA256 (Paling aman!)
+            const mySignatureString = refid + VIOLET_API_KEY + nominalDB;
+            const calculatedSignature = crypto
+                .createHmac("sha256", VIOLET_SECRET_KEY)
+                .update(mySignatureString)
+                .digest("hex");
+
+            if (calculatedSignature !== incomingSignature) {
+                console.warn(`🚫 [BOT BARU] Signature TIDAK VALID! Mengabaikan.`);
+                return res.status(200).send({ status: false, message: "Invalid signature ignored" });
+            }
+            
+            // --- Signature Valid, Lanjutkan Pemrosesan ---
+            if (incomingStatus.toLowerCase() === 'success') {
+                await TransactionNew.updateOne({ refId: refid }, { status: 'SUCCESS' });
+
+                if (transaction.produkInfo.type === 'TOPUP') {
+                    await User.updateOne({ userId }, { $inc: { saldo: nominalDB, totalTransaksi: 1 } });
+                    const updatedUser = await User.findOne({ userId });
+                    
+                    await sendTelegramMessage(BOT_TOKEN_NEW, userId, 
+                        `🎉 **Top Up Saldo Berhasil!**\nSaldo kini: Rp ${updatedUser.saldo.toLocaleString('id-ID')}.`);
+                    
+                } else if (transaction.produkInfo.type === 'PRODUCT') {
+                    const productData = await Product.findOne({ namaProduk: transaction.produkInfo.namaProduk }).select('_id');
+                    if (productData) {
+                        await deliverProduct(userId, productData._id); 
+                        await User.updateOne({ userId }, { $inc: { totalTransaksi: 1 } });
+                    } else {
+                        await sendTelegramMessage(BOT_TOKEN_NEW, userId, `⚠️ Produk ${transaction.produkInfo.namaProduk} tidak ditemukan saat delivery. Hubungi admin.`);
+                    }
+                }
+                console.log(`✅ [BOT BARU] Transaksi ${refid} berhasil diupdate ke SUCCESS.`);
+
+            } else if (incomingStatus.toLowerCase() === 'failed' || incomingStatus.toLowerCase() === 'expired') {
+                await TransactionNew.updateOne({ refId: refid, status: 'PENDING' }, { status: incomingStatus.toUpperCase() });
+                await sendTelegramMessage(BOT_TOKEN_NEW, userId, `❌ **Transaksi Gagal/Dibatalkan:** Pembayaran Anda berstatus **${incomingStatus.toUpperCase()}**.`, true);
+            }
+            
+        } else if (refid.includes(':')) {
+            // --- LOGIKA BOT LAMA (MD5 Signature Check) ---
+            
+            // Verifikasi Signature MD5 (Dipertahankan sesuai kode lama)
+            const nominalForMD5 = data.total || data.nominal || '0';
+            const calculatedSignatureOld = crypto.createHash('md5').update(VIOLET_SECRET_KEY + refid).digest('hex'); 
+            
+            if (calculatedSignatureOld === incomingSignature) {
+                 if (incomingStatus.toLowerCase() === "success") {
+                    console.log("✅ Mengalihkan ke pemrosesan BOT LAMA (NUXYS)...");
+                    await sendSuccessNotificationOld(refid, data);
+                 } else {
+                     console.log(`⚠️ Status callback non-sukses diterima untuk BOT LAMA: ${incomingStatus} (Ref: ${refid})`);
+                 }
+            } else {
+                 console.log(`🚫 Signature callback BOT LAMA TIDAK VALID! Mengabaikan.`);
+            }
+
+        } else {
+            console.log(`⚠️ Ref ID format tidak dikenali: ${refid}`);
         }
         
         // --- Wajib mengirim status 200 OK ke VMP ---
@@ -272,5 +262,5 @@ app.post("/violet-callback", async (req, res) => {
 
 // ====== SERVER LAUNCH ======
 app.listen(PORT, () => {
-    console.log(`🚀 Callback server berjalan di port ${PORT}`);
+    console.log(`🚀 Callback server berjalan di port ${PORT}. Url Callback: /violet-callback`);
 });
