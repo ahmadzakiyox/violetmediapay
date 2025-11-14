@@ -154,9 +154,9 @@ app.post("/violet-callback", async (req, res) => {
     const refid = data.ref_id || data.ref_kode || data.ref; 
     const incomingStatus = data.status;
     
-    // 💡 FIX LOKASI SIGNATURE: Mencari di Body dan Header X-Callback-Signature (Sesuai Dokumentasi)
+    // 💡 REVISI 1: Mencari signature di Body (data.signature) DAN Headers
     const incomingSignature = data.signature 
-                              || req.headers['x-callback-signature'] // <-- Spesifik dari Dokumentasi
+                              || req.headers['x-callback-signature'] 
                               || req.headers['x-hmac-sha256']
                               || undefined; 
     
@@ -176,7 +176,7 @@ app.post("/violet-callback", async (req, res) => {
 
             if (!transaction) {
                 console.log(`❌ [BOT BARU] Gagal: Transaksi ${refid} TIDAK DITEMUKAN.`);
-                return res.status(200).send({ "status": true }); // Respon sesuai harapan dokumentasi
+                return res.status(200).send({ "status": true }); 
             }
 
             if (transaction.status === 'SUCCESS') {
@@ -191,11 +191,13 @@ app.post("/violet-callback", async (req, res) => {
                 if (!incomingSignature) {
                     console.warn(`🚫 [BOT BARU] SECURITY REJECT: Signature HILANG pada status SUCCESS.`);
                     await TransactionNew.updateOne({ refId: refid }, { status: 'FAILED' }); 
-                    return res.status(200).send({ "status": true }); // Respon sesuai harapan dokumentasi
+                    return res.status(200).send({ "status": true }); 
                 }
 
-                // 2. Verifikasi Signature HMAC SHA256 (Menggunakan Formula Dokumentasi: ref_kode + apikey + nominal)
+                // 2. Verifikasi Signature HMAC SHA256
                 const nominalDB = transaction.totalBayar; 
+                
+                // 🔑 REVISI 2: Konversi nominalDB menjadi String eksplisit untuk perhitungan yang identik
                 const nominalString = String(nominalDB); 
                 
                 // Formula Signature: refId + API_KEY + nominalString
@@ -209,7 +211,7 @@ app.post("/violet-callback", async (req, res) => {
                 if (calculatedSignature !== incomingSignature) {
                     console.warn(`🚫 [BOT BARU] Signature TIDAK VALID. Transaksi sukses ditolak. Hitungan: ${calculatedSignature}`);
                     await TransactionNew.updateOne({ refId: refid }, { status: 'FAILED' }); 
-                    return res.status(200).send({ "status": true }); // Respon sesuai harapan dokumentasi
+                    return res.status(200).send({ "status": true }); 
                 }
             }
             
