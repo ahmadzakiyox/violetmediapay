@@ -1,4 +1,4 @@
-// FILE: index.js — VIOLET CALLBACK FIXED VERSION
+// FILE: index.js — VIOLET CALLBACK (MEDIUM SECURITY MODE)
 
 const express = require("express");
 const crypto = require("crypto");
@@ -9,7 +9,7 @@ const { URLSearchParams } = require("url");
 
 require("dotenv").config();
 
-// ========== ENV VARIABLES ==========
+// ========== ENV ==========
 const BOT_TOKEN_NEW = process.env.BOT_TOKEN;
 const BOT_TOKEN_OLD = process.env.OLD_BOT_TOKEN;
 const VIOLET_API_KEY = process.env.VIOLET_API_KEY;
@@ -17,14 +17,8 @@ const VIOLET_SECRET_KEY = process.env.VIOLET_SECRET_KEY;
 const MONGO_URI = process.env.MONGO_URI;
 const PORT = process.env.PORT || 37761;
 
-if (!BOT_TOKEN_NEW || !VIOLET_API_KEY || !VIOLET_SECRET_KEY || !MONGO_URI) {
-    console.error("❌ ENV ERROR: Harap isi env dengan lengkap.");
-    process.exit(1);
-}
-
-// ========== DATABASE ==========
 mongoose.connect(MONGO_URI)
-    .then(() => console.log("✅ Callback Server: MongoDB Connected"))
+    .then(() => console.log("✅ Callback Server Connected"))
     .catch(err => console.error("❌ Mongo Error:", err));
 
 const app = express();
@@ -36,10 +30,24 @@ const User = require('./models/User');
 const Product = require('./models/Product');
 const Transaction = require('./models/Transaction');
 
-// ========== HELPER SEND TELEGRAM ==========
+// ✓ WHITELIST IP VIOLET MEDIAPAY
+const VMP_ALLOWED_IP = new Set([
+    "202.155.132.37",        // IPv4 resmi
+    "2001:df7:5300:9::122"   // IPv6 resmi
+]);
+
+function getClientIp(req) {
+    return (
+        req.headers["x-forwarded-for"]?.split(",")[0] ||
+        req.connection.remoteAddress ||
+        req.socket.remoteAddress ||
+        "UNKNOWN"
+    );
+}
+
+// ========== SEND TELEGRAM ==========
 async function sendTelegramMessage(token, userId, msg) {
     if (!token) return;
-
     await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
         method: "POST",
         body: new URLSearchParams({
@@ -50,19 +58,21 @@ async function sendTelegramMessage(token, userId, msg) {
     }).catch(e => console.log("TG SEND ERROR:", e.message));
 }
 
-// ========== FUNCTION: DELIVER PRODUCT ==========
+// ========== DELIVER PRODUCT ==========
 async function deliverProduct(userId, productId) {
     try {
         const product = await Product.findById(productId);
+
         if (!product || product.kontenProduk.length === 0) {
             return sendTelegramMessage(
                 BOT_TOKEN_NEW,
                 userId,
-                "⚠️ Produk kosong. Hubungi admin."
+                "⚠️ Produk sedang kosong, hubungi Admin!"
             );
         }
 
         const key = product.kontenProduk.shift();
+
         await Product.updateOne(
             { _id: productId },
             {
@@ -71,98 +81,101 @@ async function deliverProduct(userId, productId) {
             }
         );
 
-        return sendTelegramMessage(
+        sendTelegramMessage(
             BOT_TOKEN_NEW,
             userId,
-            `🎉 *Pembayaran Sukses! Produk Dikirim*\n\n*Produk:* ${product.namaProduk}\n*Konten Anda:* \`${key}\``
+            `🎉 *Produk Berhasil Dikirim!*\n\n*Produk:* ${product.namaProduk}\n*Konten:* \`${key}\``
         );
     } catch (err) {
-        console.error("Deliver error:", err);
-        sendTelegramMessage(BOT_TOKEN_NEW, userId,
-            "❌ Terjadi kesalahan saat mengirim produk.");
+        console.log("Deliver error:", err);
+        sendTelegramMessage(
+            BOT_TOKEN_NEW,
+            userId,
+            "❌ Terjadi kesalahan pengiriman produk."
+        );
     }
 }
 
-// =================================================================
-// ===============   CALLBACK VIOLET MEDIA PAY   ====================
-// =================================================================
+// ====================================================================
+// ======================= MEDIUM SECURITY CALLBACK ===================
+// ====================================================================
 
 app.post("/violet-callback", async (req, res) => {
-
     const data = req.body;
 
     const refid = data.ref || data.ref_id || data.ref_kode;
     const status = (data.status || "").toLowerCase();
 
-    // ============ AMBIL SIGNATURE (BODY / HEADERS) =============
     const incomingSignature =
         data.signature ||
         data.sign ||
         data.sig ||
-        req.headers['x-callback-signature'] ||
-        req.headers['x-signature'] ||
-        req.headers['signature'] ||
-        req.headers['x-hmac-sha256'] ||
+        req.headers["x-callback-signature"] ||
+        req.headers["x-signature"] ||
+        req.headers["signature"] ||
+        req.headers["x-hmac-sha256"] ||
         null;
 
-    console.log("\n==== CALLBACK MASUK ====");
-    console.log("DATA:", data);
-    console.log("Ref:", refid);
-    console.log("Status:", status);
-    console.log("Signature:", incomingSignature);
+    const clientIp = getClientIp(req);
 
-    if (!refid) {
-        console.log("❌ Tidak ada refid");
-        return res.status(200).send({ status: true });
-    }
+    console.log("\n====== CALLBACK MASUK ======");
+    console.log("IP:", clientIp);
+    console.log("REF:", refid);
+    console.log("STATUS:", status);
+    console.log("SIGNATURE:", incomingSignature);
+
+    if (!refid) return res.status(200).send({ status: true });
 
     try {
-        // =========================================================
-        //          BOT BARU (PROD- / TOPUP-) SIGNATURE FIX
-        // =========================================================
+        // BOT BARU
         if (refid.startsWith("PROD-") || refid.startsWith("TOPUP-")) {
 
             const trx = await Transaction.findOne({ refId: refid });
 
             if (!trx) {
-                console.log("❌ Transaksi tidak ditemukan:", refid);
+                console.log("❌ Transaksi tidak ada.");
                 return res.status(200).send({ status: true });
             }
 
             if (trx.status === "SUCCESS") {
-                console.log("⚠️ Sudah success, skip...");
+                console.log("✔ Sudah sukses, skip");
                 return res.status(200).send({ status: true });
             }
 
-            // ============= HITUNG SIGNATURE SESUAI DOCUMENTATION ============
-            // PHP: hash_hmac('sha256', $refid, $apikey)
+            // ========== HITUNG SIGNATURE SESUAI DOK VMP ==========
+            // hash_hmac('sha256', $refid, $apikey)
             const expectedSignature = crypto
                 .createHmac("sha256", VIOLET_API_KEY)
                 .update(refid)
                 .digest("hex");
 
-            // ============= VALIDASI SIGNATURE JIKA DIKIRIM ================
+            // ===================================================================
+            // =================== MEDIUM SECURITY VALIDATION ====================
+            // ===================================================================
+
             if (incomingSignature) {
+                // Jika signature ADA → harus valid
                 if (incomingSignature !== expectedSignature) {
-                    console.log("🚫 Signature mismatch!");
-                    console.log("Expected:", expectedSignature);
+                    console.log("🚫 Signature mismatch. Callback ditolak.");
                     return res.status(200).send({ status: true });
                 }
                 console.log("✔ Signature VALID");
             } else {
-                console.log("⚠ Signature TIDAK dikirim oleh VMP (allowed)");
+                // Jika signature TIDAK ADA → cek IP
+                if (!VMP_ALLOWED_IP.has(clientIp)) {
+                    console.log("🚫 Signature hilang & IP bukan IP resmi → REJECT");
+                    return res.status(200).send({ status: true });
+                }
+                console.log("⚠ Signature tidak ada, tapi IP resmi → CONTINUE");
             }
 
-            // ===============================================================
-            // =============== PROCESS STATUS SUCCESS ========================
-            // ===============================================================
+            // ===================================================================
+            //                             SUCCESS
+            // ===================================================================
             if (status === "success") {
                 await Transaction.updateOne(
                     { refId: refid },
-                    {
-                        status: "SUCCESS",
-                        vmpSignature: incomingSignature
-                    }
+                    { status: "SUCCESS", vmpSignature: incomingSignature }
                 );
 
                 if (trx.produkInfo.type === "TOPUP") {
@@ -176,25 +189,18 @@ app.post("/violet-callback", async (req, res) => {
                     sendTelegramMessage(
                         BOT_TOKEN_NEW,
                         trx.userId,
-                        `🎉 *Top Up Sukses!*\nSaldo sekarang: *Rp ${u.saldo.toLocaleString("id-ID")}*`
+                        `🎉 *Top Up Berhasil!*\nSaldo sekarang: *Rp ${u.saldo.toLocaleString("id-ID")}*`
                     );
-
-                } else if (trx.produkInfo.type === "PRODUCT") {
+                } else {
                     const product = await Product.findOne({ namaProduk: trx.produkInfo.namaProduk });
-                    if (product) {
-                        await deliverProduct(trx.userId, product._id);
-                    } else {
-                        sendTelegramMessage(BOT_TOKEN_NEW, trx.userId,
-                            "⚠️ Produk tidak ditemukan saat pengiriman.");
-                    }
+                    if (product) deliverProduct(trx.userId, product._id);
+                    else sendTelegramMessage(BOT_TOKEN_NEW, trx.userId, "⚠️ Produk tidak ditemukan saat pengiriman.");
                 }
-
-                console.log("✔ SUCCESS diproses.");
             }
 
-            // ===============================================================
-            // ================= STATUS FAILED / EXPIRED =====================
-            // ===============================================================
+            // ===================================================================
+            //                        FAILED / EXPIRED
+            // ===================================================================
             else if (status === "failed" || status === "expired") {
                 await Transaction.updateOne(
                     { refId: refid },
@@ -204,35 +210,30 @@ app.post("/violet-callback", async (req, res) => {
                 sendTelegramMessage(
                     BOT_TOKEN_NEW,
                     trx.userId,
-                    `❌ *Transaksi ${status.toUpperCase()}*`
+                    `❌ *Transaksi ${status.toUpperCase()}!*`
                 );
             }
 
             return res.status(200).send({ status: true });
         }
 
-        // ===============================================================
-        //             BOT LAMA (refid dengan format ':')
-        // ===============================================================
+        // BOT LAMA
         if (refid.includes(":")) {
-            console.log("➡ Callback masuk ke BOT LAMA, tidak dihapus.");
+            console.log("➡ Callback BOT LAMA");
             return res.status(200).send({ status: true });
         }
 
-        console.log("⚠ Format ref tidak dikenali.");
-
+        console.log("⚠ Format ref tidak dikenal.");
         return res.status(200).send({ status: true });
 
     } catch (err) {
-        console.error("❌ ERROR CALLBACK:", err);
+        console.error("Callback Error:", err);
         return res.status(200).send({ status: true });
     }
 });
 
-// =================================================================
-// ========================== SERVER START ==========================
-// =================================================================
 
+// ========== START SERVER ==========
 app.listen(PORT, () => {
-    console.log(`🚀 Callback server berjalan di port ${PORT} | /violet-callback`);
+    console.log(`🚀 Callback server berjalan di port ${PORT}`);
 });
