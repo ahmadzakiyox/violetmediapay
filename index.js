@@ -10,7 +10,7 @@ require("dotenv").config();
 // --- Import Models ---
 const User = require('./models/User'); //
 const Product = require('./models/Product'); //
-const Transaction = require('./models/models/Transaction.js'); //
+const Transaction = require('./models/models/Transaction'); //
 
 // --- KONFIGURASI DARI ENVIRONMENT VARIABLES ---
 const BOT_TOKEN_NEW = process.env.BOT_TOKEN; 
