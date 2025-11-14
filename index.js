@@ -8,13 +8,13 @@ const { URLSearchParams } = require('url');
 require("dotenv").config();
 
 // --- Import Models ---
-const User = require('./models/User'); 
-const Product = require('./models/Product'); 
-const Transaction = require('./models/Transaction'); 
+const User = require('./models/User'); //
+const Product = require('./models/Product'); //
+const Transaction = require('./models/models/Transaction.js'); //
 
 // --- KONFIGURASI DARI ENVIRONMENT VARIABLES ---
 const BOT_TOKEN_NEW = process.env.BOT_TOKEN; 
-const BOT_TOKEN_OLD = process.env.OLD_BOT_TOKEN; 
+const BOT_TOKEN_OLD = process.env.OLD_BOT_TOKEN; // Wajib diisi
 const VIOLET_API_KEY = process.env.VIOLET_API_KEY; 
 const VIOLET_SECRET_KEY = process.env.VIOLET_SECRET_KEY;
 const MONGO_URI = process.env.MONGO_URI;
@@ -39,6 +39,7 @@ app.use(bodyParser.urlencoded({ extended: true }));
 
 
 // ====== SCHEMA LAMA & BARU ======
+// User Old (Bot Premium) - Dapatkan dari file schema lama Anda
 const userSchemaOld = new mongoose.Schema({
     userId: { type: Number, required: true, unique: true }, 
     username: String,
@@ -48,6 +49,8 @@ const userSchemaOld = new mongoose.Schema({
     email: { type: String, unique: true, sparse: true }
 });
 const UserOld = mongoose.models.UserOld || mongoose.model("UserOld", userSchemaOld, "users"); 
+
+// Transaction New (Bot Auto-Payment)
 const TransactionNew = Transaction; 
 
 
@@ -187,9 +190,9 @@ app.post("/violet-callback", async (req, res) => {
             // --- VALIDASI SIGNATURE KETAT UNTUK STATUS SUCCESS ---
             if (incomingStatus.toLowerCase() === 'success') {
                 
-                // 1. Cek Ketersediaan Signature KETAT
+                // 1. Cek Ketersediaan Signature KETAT (Tidak boleh undefined)
                 if (!incomingSignature) {
-                    console.warn(`🚫 [BOT BARU] SECURITY REJECT: Signature HILANG pada status SUCCESS.`);
+                    console.warn(`🚫 [BOT BARU] SECURITY REJECT: Signature HILANG pada status SUCCESS. (MANDATORY)`);
                     await TransactionNew.updateOne({ refId: refid }, { status: 'FAILED' }); 
                     return res.status(200).send({ status: false, message: "Security failure: Signature is required for SUCCESS status." });
                 }
@@ -197,7 +200,7 @@ app.post("/violet-callback", async (req, res) => {
                 // 2. Verifikasi Signature HMAC SHA256
                 const nominalDB = transaction.totalBayar; 
                 
-                // 🔑 REVISI 2: Konversi nominalDB menjadi String eksplisit untuk perhitungan yang identik
+                // 🔑 REVISI 2: Konversi nominalDB (Number) menjadi String eksplisit
                 const nominalString = String(nominalDB); 
                 
                 // Formula Signature: refId + API_KEY + nominalString
