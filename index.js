@@ -2,8 +2,8 @@ const express = require("express");
 const crypto = require("crypto");
 const mongoose = require("mongoose");
 const bodyParser = require("body-parser");
-const fetch = require('node-fetch'); // Untuk kirim pesan API
-const { URLSearchParams } = require('url'); // Untuk parsing body raw
+const fetch = require('node-fetch'); 
+const { URLSearchParams } = require('url'); 
 
 require("dotenv").config();
 
@@ -11,11 +11,10 @@ require("dotenv").config();
 const User = require('./models/User'); 
 const Product = require('./models/Product'); 
 const Transaction = require('./models/Transaction'); 
-// Anda perlu memastikan UserOld didefinisikan atau diimpor jika diperlukan
 
 // --- KONFIGURASI DARI ENVIRONMENT VARIABLES ---
-const BOT_TOKEN_NEW = process.env.BOT_TOKEN; // Bot baru (Auto Payment)
-const BOT_TOKEN_OLD = process.env.OLD_BOT_TOKEN; // Bot lama (Tambahkan di .env!)
+const BOT_TOKEN_NEW = process.env.BOT_TOKEN; 
+const BOT_TOKEN_OLD = process.env.OLD_BOT_TOKEN; 
 const VIOLET_API_KEY = process.env.VIOLET_API_KEY; 
 const VIOLET_SECRET_KEY = process.env.VIOLET_SECRET_KEY;
 const MONGO_URI = process.env.MONGO_URI;
@@ -35,10 +34,13 @@ mongoose.connect(MONGO_URI)
 
 const app = express();
 
-// --- Middleware Global (Hanya JSON, Form Parsing Dihapus/Dikhususkan) ---
+// --- FIX MIDDLEWARE: Aktifkan URLENCODED secara Global ---
+// VMP mengirim data dalam format ini. Ini adalah cara paling handal.
 app.use(bodyParser.json()); 
+app.use(bodyParser.urlencoded({ extended: true })); 
 
-// ====== SCHEMA LAMA & BARU ======
+
+// ====== SCHEMA LAMA & BARU (Disederhanakan) ======
 const userSchemaOld = new mongoose.Schema({
     userId: { type: Number, required: true, unique: true }, 
     username: String,
@@ -147,14 +149,10 @@ async function sendSuccessNotificationOld(refId, transactionData) {
 
 
 // ====== ENDPOINT CALLBACK VIOLET MEDIA PAY PUSAT ======
-app.post("/violet-callback", 
-    // FIX 1: Gunakan raw body parser khusus untuk rute ini
-    bodyParser.raw({ type: 'application/x-www-form-urlencoded' }), 
-    async (req, res) => {
+app.post("/violet-callback", async (req, res) => {
     
-    // FIX 2: Parse body secara manual untuk menjamin semua field terbaca
-    const bodyString = req.body.toString('utf8');
-    const data = Object.fromEntries(new URLSearchParams(bodyString));
+    // FIX 4: Data sekarang ada di req.body berkat middleware global
+    const data = req.body; 
 
     const refid = data.ref_id || data.ref_kode || data.ref; 
     const incomingStatus = data.status;
@@ -163,10 +161,20 @@ app.post("/violet-callback",
     console.log(`\n--- CALLBACK DITERIMA PUSAT ---`);
     console.log(`Ref ID: ${refid}, Status: ${incomingStatus}, Signature Found: ${!!incomingSignature}`);
 
-    // FIX 3: Validasi Awal, yang sekarang seharusnya tidak gagal karena body sudah dibaca
-    if (!refid || !incomingStatus || !incomingSignature) {
-        console.error("❌ Callback: Missing essential data (refid, status, or signature).");
+    // Validasi Awal
+    if (!refid || !incomingStatus) {
+        console.error("❌ Callback: Missing essential data (refid atau status).");
         return res.status(400).send({ status: false, message: "Missing essential data" });
+    }
+    
+    // Periksa Signature: Kami hanya menerima jika signature ada dan cocok, atau jika tidak ada, 
+    // kami hanya memproses status failed/expired tanpa validasi signature ketat.
+    if (!incomingSignature) {
+        console.warn("⚠️ Signature hilang! Memproses hanya jika status FAILED/EXPIRED.");
+        if (incomingStatus.toLowerCase() !== 'failed' && incomingStatus.toLowerCase() !== 'expired') {
+            console.error("❌ Callback: Signature hilang dan status bukan GAGAL/EXPIRED. Ditolak.");
+            return res.status(200).send({ status: false, message: "Signature missing. Ditolak." });
+        }
     }
     
     try {
@@ -185,11 +193,10 @@ app.post("/violet-callback",
                 return res.status(200).send({ status: true, message: "Already processed" });
             }
 
-            // FIX NOMINAL ISSUE: Menggunakan Nominal dari DB untuk Verifikasi
             const nominalDB = transaction.totalBayar; 
             const userId = transaction.userId;
 
-            // Verifikasi Signature HMACS SHA256
+            // Verifikasi Signature HMACS SHA256 (Menggunakan Nominal DB)
             const mySignatureString = refid + VIOLET_API_KEY + nominalDB;
             const calculatedSignature = crypto
                 .createHmac("sha256", VIOLET_SECRET_KEY)
