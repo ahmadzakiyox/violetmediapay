@@ -2,19 +2,20 @@ const express = require("express");
 const crypto = require("crypto");
 const mongoose = require("mongoose");
 const bodyParser = require("body-parser");
-const fetch = require('node-fetch'); // Digunakan untuk kirim pesan API
-const { URLSearchParams } = require('url');
+const fetch = require('node-fetch'); // Untuk kirim pesan API
+const { URLSearchParams } = require('url'); // Untuk parsing body raw
 
 require("dotenv").config();
 
-// --- Import Models (Untuk Bot Auto-Payment Baru) ---
-const User = require('./models/User'); //
-const Product = require('./models/Product'); //
-const Transaction = require('./models/Transaction'); //
+// --- Import Models ---
+const User = require('./models/User'); 
+const Product = require('./models/Product'); 
+const Transaction = require('./models/Transaction'); 
+// Anda perlu memastikan UserOld didefinisikan atau diimpor jika diperlukan
 
 // --- KONFIGURASI DARI ENVIRONMENT VARIABLES ---
-const BOT_TOKEN_NEW = process.env.BOT_TOKEN; // Asumsi ini adalah token untuk bot baru
-const BOT_TOKEN_OLD = process.env.OLD_BOT_TOKEN; // Tambahkan ini di .env untuk bot lama
+const BOT_TOKEN_NEW = process.env.BOT_TOKEN; // Bot baru (Auto Payment)
+const BOT_TOKEN_OLD = process.env.OLD_BOT_TOKEN; // Bot lama (Tambahkan di .env!)
 const VIOLET_API_KEY = process.env.VIOLET_API_KEY; 
 const VIOLET_SECRET_KEY = process.env.VIOLET_SECRET_KEY;
 const MONGO_URI = process.env.MONGO_URI;
@@ -22,8 +23,8 @@ const MONGO_URI = process.env.MONGO_URI;
 // FIX PORT: Gunakan PORT Heroku atau fallback
 const PORT = process.env.PORT || 37761; 
 
-if (!BOT_TOKEN_NEW || !VIOLET_SECRET_KEY || !MONGO_URI) {
-    console.error("❌ ERROR: Pastikan variabel environment penting terisi.");
+if (!BOT_TOKEN_NEW || !VIOLET_SECRET_KEY || !MONGO_URI || !BOT_TOKEN_OLD) {
+    console.error("❌ ERROR: Pastikan semua variabel environment (termasuk OLD_BOT_TOKEN) terisi.");
     process.exit(1);
 }
 
@@ -33,12 +34,11 @@ mongoose.connect(MONGO_URI)
   .catch(err => console.error("❌ Callback Server: MongoDB Error:", err));
 
 const app = express();
-app.use(bodyParser.urlencoded({ extended: true })); 
+
+// --- Middleware Global (Hanya JSON, Form Parsing Dihapus/Dikhususkan) ---
 app.use(bodyParser.json()); 
 
-
 // ====== SCHEMA LAMA & BARU ======
-// === SCHEMA LAMA (Bot Premium) ===
 const userSchemaOld = new mongoose.Schema({
     userId: { type: Number, required: true, unique: true }, 
     username: String,
@@ -47,17 +47,14 @@ const userSchemaOld = new mongoose.Schema({
     premiumUntil: Date,
     email: { type: String, unique: true, sparse: true }
 });
-// Pastikan nama koleksi sesuai dengan bot lama Anda
 const UserOld = mongoose.models.UserOld || mongoose.model("UserOld", userSchemaOld, "users"); 
 const TransactionNew = Transaction; 
+
 
 // ====================================================
 // ====== UTILITY FUNCTIONS (Direct API Messaging) ======
 // ====================================================
 
-/**
- * Mengirim pesan ke Telegram menggunakan API langsung tanpa instance Telegraf.
- */
 async function sendTelegramMessage(token, userId, message, isMarkdown = true) {
     if (!token) {
         console.error(`❌ Gagal mengirim pesan: Token bot tidak ditemukan untuk user ${userId}.`);
@@ -77,7 +74,6 @@ async function sendTelegramMessage(token, userId, message, isMarkdown = true) {
     }
 }
 
-// Fungsi untuk mengirim produk (Diperbarui menggunakan sendTelegramMessage)
 async function deliverProduct(userId, productId) {
     try {
         const product = await Product.findById(productId);
@@ -106,8 +102,6 @@ async function deliverProduct(userId, productId) {
     }
 }
 
-
-// ====== FUNGSI NOTIFIKASI SUKSES (BOT PREMIUM LAMA - NUXYS) =====
 async function sendSuccessNotificationOld(refId, transactionData) {
     
     const refIdParts = refId.split(':');
@@ -153,18 +147,23 @@ async function sendSuccessNotificationOld(refId, transactionData) {
 
 
 // ====== ENDPOINT CALLBACK VIOLET MEDIA PAY PUSAT ======
-app.post("/violet-callback", async (req, res) => {
+app.post("/violet-callback", 
+    // FIX 1: Gunakan raw body parser khusus untuk rute ini
+    bodyParser.raw({ type: 'application/x-www-form-urlencoded' }), 
+    async (req, res) => {
     
-    const data = req.body; 
-    
-    // Pastikan ini adalah parser x-www-form-urlencoded
+    // FIX 2: Parse body secara manual untuk menjamin semua field terbaca
+    const bodyString = req.body.toString('utf8');
+    const data = Object.fromEntries(new URLSearchParams(bodyString));
+
     const refid = data.ref_id || data.ref_kode || data.ref; 
     const incomingStatus = data.status;
     const incomingSignature = data.signature;
     
     console.log(`\n--- CALLBACK DITERIMA PUSAT ---`);
-    console.log(`Ref ID: ${refid}, Status: ${incomingStatus}`);
+    console.log(`Ref ID: ${refid}, Status: ${incomingStatus}, Signature Found: ${!!incomingSignature}`);
 
+    // FIX 3: Validasi Awal, yang sekarang seharusnya tidak gagal karena body sudah dibaca
     if (!refid || !incomingStatus || !incomingSignature) {
         console.error("❌ Callback: Missing essential data (refid, status, or signature).");
         return res.status(400).send({ status: false, message: "Missing essential data" });
@@ -186,10 +185,11 @@ app.post("/violet-callback", async (req, res) => {
                 return res.status(200).send({ status: true, message: "Already processed" });
             }
 
+            // FIX NOMINAL ISSUE: Menggunakan Nominal dari DB untuk Verifikasi
             const nominalDB = transaction.totalBayar; 
             const userId = transaction.userId;
 
-            // Verifikasi Signature HMACS SHA256 (Paling aman!)
+            // Verifikasi Signature HMACS SHA256
             const mySignatureString = refid + VIOLET_API_KEY + nominalDB;
             const calculatedSignature = crypto
                 .createHmac("sha256", VIOLET_SECRET_KEY)
@@ -197,7 +197,7 @@ app.post("/violet-callback", async (req, res) => {
                 .digest("hex");
 
             if (calculatedSignature !== incomingSignature) {
-                console.warn(`🚫 [BOT BARU] Signature TIDAK VALID! Mengabaikan.`);
+                console.warn(`🚫 [BOT BARU] Signature TIDAK VALID! Nominal Cek: ${nominalDB}.`);
                 return res.status(200).send({ status: false, message: "Invalid signature ignored" });
             }
             
@@ -232,7 +232,6 @@ app.post("/violet-callback", async (req, res) => {
             // --- LOGIKA BOT LAMA (MD5 Signature Check) ---
             
             // Verifikasi Signature MD5 (Dipertahankan sesuai kode lama)
-            const nominalForMD5 = data.total || data.nominal || '0';
             const calculatedSignatureOld = crypto.createHash('md5').update(VIOLET_SECRET_KEY + refid).digest('hex'); 
             
             if (calculatedSignatureOld === incomingSignature) {
