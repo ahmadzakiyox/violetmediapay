@@ -1,10 +1,17 @@
-const path = require('path');
+// FILE: index.js
+// Server Callback + Dashboard API + Log Streaming
+
 const express = require("express");
 const crypto = require("crypto");
 const mongoose = require("mongoose");
 const bodyParser = require("body-parser");
 const fetch = require("node-fetch");
 const { URLSearchParams } = require("url");
+const path = require('path');
+const http = require('http'); // Untuk Socket.io
+const { Server } = require("socket.io"); // Server Socket.io
+const { LogStream } = require('@heroku-cli/stream'); // Stream Log Heroku
+const stream = require('stream'); // Utility stream Node.js
 
 require("dotenv").config();
 
@@ -14,32 +21,44 @@ const VIOLET_API_KEY = process.env.VIOLET_API_KEY;
 const VIOLET_SECRET_KEY = process.env.VIOLET_SECRET_KEY;
 const MONGO_URI = process.env.MONGO_URI;
 const PORT = process.env.PORT || 37761;
+const HEROKU_API_TOKEN = process.env.HEROKU_API_TOKEN;
+const HEROKU_APP_NAME = process.env.HEROKU_APP_NAME;
 
 // Validasi ENV
 if (!BOT_TOKEN || !MONGO_URI || !VIOLET_API_KEY || !VIOLET_SECRET_KEY) {
     console.error("❌ ERROR: Pastikan BOT_TOKEN, MONGO_URI, VIOLET_API_KEY, dan VIOLET_SECRET_KEY terisi di .env");
     process.exit(1);
 }
+if (!HEROKU_API_TOKEN || !HEROKU_APP_NAME) {
+    console.warn("⚠️ PERINGATAN: HEROKU_API_TOKEN atau HEROKU_APP_NAME tidak diatur di .env. Streaming log akan dinonaktifkan.");
+}
 
+// ========== KONEKSI DB ==========
 mongoose.connect(MONGO_URI)
     .then(() => console.log("✅ Callback Server Connected to MongoDB"))
     .catch(err => console.error("❌ Mongo Error:", err));
 
+// ========== INISIASI SERVER & SOCKET ==========
 const app = express();
+const server = http.createServer(app); // Buat server HTTP dari Express
+const io = new Server(server); // Pasang Socket.io ke server HTTP
+
+// ========== MIDDLEWARE ==========
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
+// Sajikan file statis dari folder 'public'
+app.use(express.static(path.join(__dirname, 'public')));
 
 // ========== MODELS ==========
 const User = require('./models/User');
 const Product = require('./models/Product');
 const Transaction = require('./models/Transaction');
-// (Pastikan Setting.js juga di-import jika Anda membutuhkannya untuk notifikasi channel)
 const Setting = require('./models/Setting'); 
 
-// ✓ WHITELIST IP VIOLET MEDIAPAY
+// ========== HELPER: IP & TELEGRAM ==========
 const VMP_ALLOWED_IP = new Set([
-    "202.155.132.37",        // IPv4 resmi
-    "2001:df7:5300:9::122"   // IPv6 resmi
+    "202.155.132.37",
+    "2001:df7:5300:9::122"
 ]);
 
 function getClientIp(req) {
@@ -53,7 +72,6 @@ function getClientIp(req) {
 
 async function sendTelegramMessage(userId, msg) {
     if (!BOT_TOKEN) return;
-    
     await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
         method: "POST",
         body: new URLSearchParams({
@@ -70,7 +88,6 @@ async function sendChannelNotification(message) {
         console.warn("[WARN] CHANNEL_ID tidak diatur, notifikasi penjualan/topup dibatalkan.");
         return;
     }
-
     try {
         await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
             method: "POST",
@@ -85,25 +102,12 @@ async function sendChannelNotification(message) {
     }
 }
 
-function formatUptime(seconds) {
-    function pad(s) {
-        return (s < 10 ? '0' : '') + s;
-    }
-    const hours = Math.floor(seconds / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-    const secs = Math.floor(seconds % 60);
-    return `${pad(hours)}h ${pad(minutes)}m ${pad(secs)}s`;
-}
-
+// ========== HELPER: PENGIRIMAN PRODUK ==========
 async function deliverProductAndNotify(userId, productId, transaction, product) {
     try {
-        // Logika pengiriman (mengambil 1 stok)
-        // (Harus identik dengan fungsi deliverProduct di bot.js)
         const productData = await Product.findById(productId);
-
         if (!productData || productData.kontenProduk.length === 0) {
             console.warn(`[DELIVER-CB] Stok habis saat callback untuk ID: ${productId}`);
-            // Kirim notif ke admin jika stok habis saat pengiriman?
             const ADMIN_IDS = process.env.ADMIN_IDS ? process.env.ADMIN_IDS.split(',').map(id => parseInt(id.trim())) : [];
             if (ADMIN_IDS.length > 0) {
                 sendTelegramMessage(ADMIN_IDS[0], `⚠️ [ADMIN CALLBACK] User ${userId} membeli ${productData?.namaProduk} TAPI STOK HABIS saat dieksekusi! (Ref: ${transaction.refId})`);
@@ -114,21 +118,17 @@ async function deliverProductAndNotify(userId, productId, transaction, product) 
             );
         }
 
-        const deliveredContent = productData.kontenProduk.shift(); // Ambil 1 konten
-
-        // Update DB: kurangi stok & konten, tambah terjual
+        const deliveredContent = productData.kontenProduk.shift();
         await Product.updateOne({ _id: productId }, {
             $set: { kontenProduk: productData.kontenProduk },
             $inc: { stok: -1, totalTerjual: 1 }
         });
         
-        // Dapatkan stok terbaru (stok awal - 1)
-        const stokAkhir = productData.kontenProduk.length; // Ini adalah stok akhir
-        const stokAwal = stokAkhir + 1; // Ini adalah stok awal sebelum .shift()
+        const stokAkhir = productData.kontenProduk.length;
+        const stokAwal = stokAkhir + 1;
 
-        // Kirim notifikasi ke Channel
         const notifMessage = `🎉 **PENJUALAN BARU (QRIS)** 🎉\n\n` +
-                           `👤 **Pembeli:** [${transaction.userId}](tg://user?id=${transaction.userId})\n` + // Asumsi user ada
+                           `👤 **Pembeli:** [${transaction.userId}](tg://user?id=${transaction.userId})\n` +
                            `🛍️ **Produk:** \`${product.namaProduk}\`\n` +
                            `💰 **Total:** \`Rp ${product.harga.toLocaleString('id-ID')}\`\n\n` +
                            `--- *Info Tambahan* ---\n` +
@@ -137,7 +137,6 @@ async function deliverProductAndNotify(userId, productId, transaction, product) 
                            `🆔 **Ref ID:** \`${transaction.refId}\``;
         await sendChannelNotification(notifMessage);
 
-        // Dapatkan Stiker Sukses
         const stickerSetting = await Setting.findOne({ key: 'success_sticker_id' });
         if (stickerSetting && stickerSetting.value) {
             await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendSticker`, {
@@ -146,7 +145,6 @@ async function deliverProductAndNotify(userId, productId, transaction, product) 
             }).catch(e => console.log("Gagal kirim stiker CB:", e.message));
         }
 
-        // Kirim pesan sukses ke user
         const date = new Date();
         const dateCreated = `${date.getDate()}/${date.getMonth() + 1}/${date.getFullYear()}, ${date.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).replace(/:/g, '.')}`;
 
@@ -162,7 +160,6 @@ async function deliverProductAndNotify(userId, productId, transaction, product) 
         successMessage += "```txt\n";
         successMessage += `1. ${deliveredContent}\n`;
         successMessage += "```";
-
         sendTelegramMessage(userId, successMessage);
 
     } catch (err) {
@@ -174,73 +171,53 @@ async function deliverProductAndNotify(userId, productId, transaction, product) 
     }
 }
 
+// ====================================================================
+// ===================== RUTE: VIOLET CALLBACK ========================
+// ====================================================================
 app.post("/violet-callback", async (req, res) => {
     const data = req.body;
-
     const refid = data.ref || data.ref_id || data.ref_kode;
     const status = (data.status || "").toLowerCase();
-
     const incomingSignature =
-        data.signature ||
-        data.sign ||
-        data.sig ||
-        req.headers["x-callback-signature"] ||
-        req.headers["x-signature"] ||
-        req.headers["signature"] ||
-        req.headers["x-hmac-sha256"] ||
-        null;
-
+        data.signature || data.sign || data.sig ||
+        req.headers["x-callback-signature"] || req.headers["x-signature"] ||
+        req.headers["signature"] || req.headers["x-hmac-sha256"] || null;
     const clientIp = getClientIp(req);
 
     console.log("\n====== CALLBACK MASUK ======");
     console.log("IP:", clientIp);
     console.log("REF:", refid);
     console.log("STATUS:", status);
-    console.log("SIGNATURE:", incomingSignature);
 
-
-    if (!refid) {
-        console.log("Ref ID kosong, skip.");
-        return res.status(200).send({ status: true });
-    }
-
-
+    if (!refid) return res.status(200).send({ status: true });
     if (!refid.startsWith("PROD-") && !refid.startsWith("TOPUP-")) {
         console.log(`⚠ Format ref tidak dikenal: ${refid}. Skip.`);
         return res.status(200).send({ status: true });
     }
 
     try {
-    
         const trx = await Transaction.findOne({ refId: refid });
-
         if (!trx) {
             console.log(`❌ Transaksi ${refid} tidak ada di DB.`);
             return res.status(200).send({ status: true });
         }
-
         if (trx.status === "SUCCESS") {
             console.log(`✔ Ref ${refid} sudah sukses, skip.`);
             return res.status(200).send({ status: true });
         }
 
- 
         const expectedSignature = crypto
             .createHmac("sha256", VIOLET_API_KEY)
             .update(refid)
             .digest("hex");
 
         if (incomingSignature) {
-            // Jika signature ADA → harus valid
             if (incomingSignature !== expectedSignature) {
-                console.log(`🚫 Signature mismatch. (Ref: ${refid}). Callback ditolak.`);
-                console.log(`   Expected: ${expectedSignature}`);
-                console.log(`   Received: ${incomingSignature}`);
+                console.log(`🚫 Signature mismatch. (Ref: ${refid}). Ditolak.`);
                 return res.status(200).send({ status: true });
             }
             console.log(`✔ Signature VALID (Ref: ${refid})`);
         } else {
-            // Jika signature TIDAK ADA → cek IP
             if (!VMP_ALLOWED_IP.has(clientIp)) {
                 console.log(`🚫 Signature hilang & IP (${clientIp}) bukan IP resmi → REJECT (Ref: ${refid})`);
                 return res.status(200).send({ status: true });
@@ -253,7 +230,6 @@ app.post("/violet-callback", async (req, res) => {
                 { refId: refid },
                 { status: "SUCCESS", vmpSignature: incomingSignature }
             );
-
             console.log(`✅ PROSES SUCCESS (Ref: ${refid})`);
 
             if (trx.produkInfo.type === "TOPUP") {
@@ -261,10 +237,9 @@ app.post("/violet-callback", async (req, res) => {
                     { userId: trx.userId },
                     { $inc: { saldo: trx.totalBayar, totalTransaksi: 1 } }
                 );
-
                 const u = await User.findOne({ userId: trx.userId });
                 const saldoAkhir = u ? u.saldo : trx.totalBayar;
-           
+
                 const notifMessage = `💰 **TOP-UP SUKSES (QRIS)** 💰\n\n` +
                                    `👤 **User:** [${u.username || trx.userId}](tg://user?id=${trx.userId})\n` +
                                    `💰 **Total:** \`Rp ${trx.totalBayar.toLocaleString('id-ID')}\`\n` +
@@ -273,62 +248,58 @@ app.post("/violet-callback", async (req, res) => {
                 
                 const stickerSetting = await Setting.findOne({ key: 'success_sticker_id' });
                 if (stickerSetting && stickerSetting.value) {
-                    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendSticker`, {
+                    await fetch(`https.api.telegram.org/bot${BOT_TOKEN}/sendSticker`, {
                         method: "POST",
                         body: new URLSearchParams({ chat_id: trx.userId, sticker: stickerSetting.value })
                     }).catch(e => console.log("Gagal kirim stiker CB:", e.message));
                 }
-
-              
                 sendTelegramMessage(
                     trx.userId,
                     `╭─────────────────────────\n│ 🎉 Top Up Saldo Berhasil!\n│ Saldo kini: Rp ${saldoAkhir.toLocaleString("id-ID")}.\n╰─────────────────────────`
                 );
-            
-    
             } else {
                 const product = await Product.findOne({ namaProduk: trx.produkInfo.namaProduk });
                 if (product) {
-                  
                     await deliverProductAndNotify(trx.userId, product._id, trx, product);
                 } else {
-                    sendTelegramMessage(trx.userId, `⚠️ Produk \`${trx.produkInfo.namaProduk}\` tidak ditemukan saat pengiriman (Ref: ${refid}). Hubungi Admin.`);
+                    sendTelegramMessage(trx.userId, `⚠️ Produk \`${trx.produkInfo.namaProduk}\` tidak ditemukan (Ref: ${refid}). Hubungi Admin.`);
                 }
             }
-   
         } else if (status === "failed" || status === "expired") {
             await Transaction.updateOne(
                 { refId: refid },
                 { status: status.toUpperCase() }
             );
-
             console.log(`❌ PROSES ${status.toUpperCase()} (Ref: ${refid})`);
-
             sendTelegramMessage(
                 trx.userId,
                 `❌ *Transaksi ${status.toUpperCase()}!* (Ref: \`${refid}\`)`
             );
         }
-
         return res.status(200).send({ status: true });
-
     } catch (err) {
         console.error(`[Callback Error] Ref: ${refid} | Error: ${err.message}`);
-        console.error(err); // Log stack trace
         return res.status(200).send({ status: true });
     }
 });
 
+// ====================================================================
+// ===================== RUTE: DASHBOARD API ==========================
+// ====================================================================
+
+function formatUptime(seconds) {
+    function pad(s) { return (s < 10 ? '0' : '') + s; }
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${pad(hours)}h ${pad(minutes)}m ${pad(secs)}s`;
+}
+
 app.get('/api/stats', async (req, res) => {
     try {
-        // 1. Dapatkan data secara paralel
         const [
-            totalUsers,
-            totalProducts,
-            totalTransactions,
-            successTransactions,
-            pendingTransactions,
-            failedTransactions
+            totalUsers, totalProducts, totalTransactions,
+            successTransactions, pendingTransactions, failedTransactions
         ] = await Promise.all([
             User.countDocuments(),
             Product.countDocuments(),
@@ -338,18 +309,14 @@ app.get('/api/stats', async (req, res) => {
             Transaction.countDocuments({ status: { $in: ['FAILED', 'EXPIRED'] } })
         ]);
 
-        // 2. Dapatkan status DB
-        // 0 = disconnected, 1 = connected, 2 = connecting, 3 = disconnecting
         const dbState = mongoose.connection.readyState;
         let dbStatus = 'DISCONNECTED';
         if (dbState === 1) dbStatus = 'CONNECTED';
         if (dbState === 2) dbStatus = 'CONNECTING';
 
-        // 3. Dapatkan Uptime Server (dari process)
         const uptimeSeconds = process.uptime();
         const uptimeFormatted = formatUptime(uptimeSeconds);
 
-        // 4. Kirim sebagai JSON
         res.json({
             dbStatus: dbStatus,
             serverUptime: uptimeFormatted,
@@ -360,17 +327,67 @@ app.get('/api/stats', async (req, res) => {
             pendingTransactions: pendingTransactions,
             failedTransactions: failedTransactions
         });
-
     } catch (error) {
         console.error("Error fetching stats:", error);
         res.status(500).json({ error: "Failed to fetch stats" });
     }
 });
 
-app.get('/admin', (req, res) => {
+app.get('/dashboard', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-app.listen(PORT, () => {
-    console.log(`🚀 Callback server (Hanya Bot Baru) berjalan di port ${PORT}`);
+// ====================================================================
+// ================= LOGIKA: SOCKET.IO LOG STREAM =====================
+// ====================================================================
+io.on('connection', (socket) => {
+    console.log('🔌 Dashboard Admin terhubung via WebSocket');
+    socket.emit('log', { line: '=== [Log Stream] Berhasil terhubung ke server WebSocket ===\n', source: 'server' });
+
+    if (HEROKU_API_TOKEN && HEROKU_APP_NAME) {
+        try {
+            const logStream = new LogStream({
+                heroku: { token: HEROKU_API_TOKEN },
+                app: HEROKU_APP_NAME,
+                lines: 100 // Ambil 100 baris log terakhir
+            });
+
+            const logProcessor = new stream.Transform({
+                transform(chunk, encoding, callback) {
+                    const line = chunk.toString('utf8');
+                    let source = 'app';
+                    if (line.includes('heroku[router]')) source = 'router';
+                    else if (line.includes('heroku[scheduler]')) source = 'scheduler';
+                    
+                    io.emit('log', { line: line + '\n', source: source });
+                    callback();
+                }
+            });
+
+            logStream.pipe(logProcessor);
+            console.log(`📡 Memulai streaming log dari Heroku untuk: ${HEROKU_APP_NAME}`);
+            
+            logStream.on('error', (err) => {
+                console.error("Error streaming log Heroku:", err.message);
+                io.emit('log', { line: `=== [Log Stream] ERROR: ${err.message} ===\n`, source: 'error' });
+            });
+
+            socket.on('disconnect', () => {
+                console.log('🔌 Dashboard Admin terputus');
+                logStream.abort(); // Hentikan streaming
+            });
+
+        } catch (err) {
+            console.error("Gagal memulai stream Heroku:", err);
+            io.emit('log', { line: `=== [Log Stream] Gagal memulai stream: ${err.message} ===\n`, source: 'error' });
+        }
+    } else {
+        socket.emit('log', { line: '=== [Log Stream] HEROKU_API_TOKEN atau HEROKU_APP_NAME tidak diatur. Streaming log dinonaktifkan. ===\n', source: 'error' });
+    }
+});
+
+
+// ========== START SERVER ==========
+server.listen(PORT, () => {
+    console.log(`🚀 Callback server (Dashboard & Logs) berjalan di port ${PORT}`);
 });
