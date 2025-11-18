@@ -1,272 +1,349 @@
+// FILE: index.js — VIOLET CALLBACK (Hanya Bot Baru)
+
 const express = require("express");
 const crypto = require("crypto");
 const mongoose = require("mongoose");
-const { Telegraf } = require("telegraf"); 
-const path = require('path'); 
+const bodyParser = require("body-parser");
+const fetch = require("node-fetch");
+const { URLSearchParams } = require("url");
 
-// PENTING: Memastikan environment variables dimuat saat file ini dijalankan
 require("dotenv").config();
 
-const app = express();
-const PORT = process.env.PORT || 3000; 
-
-// --- KONFIGURASI DARI ENVIRONMENT VARIABLES ---
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const VIOLET_API_KEY = process.env.VIOLET_API_KEY; 
+// ========== ENV ==========
+const BOT_TOKEN = process.env.BOT_TOKEN; // Hanya 1 token
+const VIOLET_API_KEY = process.env.VIOLET_API_KEY;
 const VIOLET_SECRET_KEY = process.env.VIOLET_SECRET_KEY;
 const MONGO_URI = process.env.MONGO_URI;
-const VIOLET_IP = '202.155.132.37'; 
+const PORT = process.env.PORT || 37761;
 
-// ====== KONEKSI DATABASE & SCHEMA ======
+// Validasi ENV
+if (!BOT_TOKEN || !MONGO_URI || !VIOLET_API_KEY || !VIOLET_SECRET_KEY) {
+    console.error("❌ ERROR: Pastikan BOT_TOKEN, MONGO_URI, VIOLET_API_KEY, dan VIOLET_SECRET_KEY terisi di .env");
+    process.exit(1);
+}
 
 mongoose.connect(MONGO_URI)
-  .then(() => console.log("✅ Callback Server: MongoDB Connected"))
-  .catch(err => console.error("❌ Callback Server: MongoDB Error:", err));
+    .then(() => console.log("✅ Callback Server Connected to MongoDB"))
+    .catch(err => console.error("❌ Mongo Error:", err));
 
-const bot = new Telegraf(BOT_TOKEN); 
+const app = express();
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
 
-// === SCHEMA LAMA (Bot Premium: Ref ID NUXYS:) ===
-const userSchemaOld = new mongoose.Schema({
-    userId: { type: Number, required: true, unique: true }, 
-    username: String,
-    isPremium: { type: Boolean, default: false },
-    refId: { type: String, index: true }, 
-    premiumUntil: Date,
-    email: { type: String, unique: true, sparse: true }
-});
-const UserOld = mongoose.models.UserOld || mongoose.model("User", userSchemaOld); 
+// ========== MODELS ==========
+const User = require('./models/User');
+const Product = require('./models/Product');
+const Transaction = require('./models/Transaction');
+// (Pastikan Setting.js juga di-import jika Anda membutuhkannya untuk notifikasi channel)
+const Setting = require('./models/Setting'); 
 
+// ✓ WHITELIST IP VIOLET MEDIAPAY
+const VMP_ALLOWED_IP = new Set([
+    "202.155.132.37",        // IPv4 resmi
+    "2001:df7:5300:9::122"   // IPv6 resmi
+]);
 
-// === SCHEMA BARU (Bot Auto-Payment: Ref ID PROD-/TOPUP-) ===
-const transactionSchemaNew = new mongoose.Schema({
-    userId: { type: Number, required: true },
-    refId: { type: String, required: true, unique: true }, 
-    status: { type: String, enum: ['PENDING', 'SUCCESS', 'FAILED', 'EXPIRED'], default: 'PENDING' },
-    produkInfo: { 
-        type: { type: String, enum: ['PRODUCT', 'TOPUP'], default: 'PRODUCT' },
-        namaProduk: String,
-    },
-    totalBayar: { type: Number, required: true },
-    metodeBayar: { type: String, enum: ['QRIS', 'SALDO'], default: 'QRIS' },
-    waktuDibuat: { type: Date, default: Date.now },
-});
-const TransactionNew = mongoose.models.TransactionNew || mongoose.model("TransactionNew", transactionSchemaNew);
+function getClientIp(req) {
+    return (
+        req.headers["x-forwarded-for"]?.split(",")[0] ||
+        req.connection.remoteAddress ||
+        req.socket.remoteAddress ||
+        "UNKNOWN"
+    );
+}
 
-
-// ====== MIDDLEWARE UTAMA ======
-app.use(express.json());
-app.use(express.urlencoded({ extended: true })); 
-
-
-// ====== FUNGSI PEMROSESAN LAMA (Bot Premium) - DENGAN RETRY LOGIC LENGKAP =====
-async function sendSuccessNotificationOld(refId, transactionData) {
+// ========== SEND TELEGRAM (Disederhanakan) ==========
+/**
+ * Mengirim pesan Telegram menggunakan BOT_TOKEN global.
+ * @param {string|number} userId - ID User Telegram
+ * @param {string} msg - Pesan dalam format Markdown
+ */
+async function sendTelegramMessage(userId, msg) {
+    if (!BOT_TOKEN) return;
     
-    const refIdParts = refId.split(':');
-    const telegramUsername = refIdParts[1] || 'UnknownUser'; 
-    const telegramId = parseInt(refIdParts[2]);
+    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+        method: "POST",
+        body: new URLSearchParams({
+            chat_id: userId,
+            text: msg,
+            parse_mode: "Markdown"
+        })
+    }).catch(e => console.log("[TG SEND ERROR]:", e.message));
+}
 
-    if (isNaN(telegramId)) {
-        console.error(`❌ Callback: Tidak dapat mengurai telegramId dari Ref ID lama: ${refId}`);
+// ========== NOTIFIKASI CHANNEL ==========
+// (Fungsi ini diambil dari bot.js untuk notifikasi callback)
+async function sendChannelNotification(message) {
+    const CHANNEL_ID = process.env.CHANNEL_ID;
+    if (!CHANNEL_ID) {
+        console.warn("[WARN] CHANNEL_ID tidak diatur, notifikasi penjualan/topup dibatalkan.");
         return;
     }
 
-    const MAX_RETRIES = 5; 
-    const RETRY_DELAY = 2000;
-
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-        try {
-            // Coba Cari user berdasarkan refId ATAU userId
-            let user = await UserOld.findOne({ $or: [{ refId: refId }, { userId: telegramId }] });
-            
-            if (!user) {
-                if (attempt < MAX_RETRIES) {
-                    console.log(`⏳ Callback: User ${refId} belum ditemukan. Mencoba lagi dalam ${RETRY_DELAY / 1000} detik (Percobaan ${attempt}/${MAX_RETRIES}).`);
-                    await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
-                    continue; 
-                } else {
-                    // Percobaan terakhir: Paksa UPSERT
-                    console.log(`⚠️ Callback UPSERT: User ${refId} tidak ditemukan. Mencoba membuat/update via UPSERT.`);
-                    
-                    const uniqueEmailPlaceholder = `tg_${telegramId}_${Date.now()}@callback.co`;
-                    
-                    user = await UserOld.findOneAndUpdate(
-                        { userId: telegramId }, 
-                        {
-                            userId: telegramId,
-                            username: telegramUsername,
-                            refId: refId,
-                            email: uniqueEmailPlaceholder
-                        },
-                        { new: true, upsert: true, setDefaultsOnInsert: true }
-                    );
-
-                    if (!user) {
-                        console.error(`❌ Callback ERROR: Gagal membuat/menemukan User ${telegramId} setelah UPSERT. Mengabaikan.`);
-                        return;
-                    }
-                    console.log(`✅ Callback: User ${telegramId} berhasil dibuat/diupdate via UPSERT.`);
-                }
-            }
-            
-            // --- UPDATE STATUS PREMIUM ---
-            const premiumDurationDays = 30; 
-            let newExpiryDate = user.premiumUntil || new Date();
-            if (newExpiryDate < new Date()) {
-                newExpiryDate = new Date();
-            }
-            newExpiryDate.setDate(newExpiryDate.getDate() + premiumDurationDays);
-
-            await UserOld.updateOne(
-                { userId: telegramId },
-                { isPremium: true, premiumUntil: newExpiryDate, refId: refId }
-            );
-            
-            console.log(`\n============== CALLBACK SUCCESS LOG (OLD BOT) ==============`);
-            console.log(`✅ User ${telegramId} | ${telegramUsername} TELAH DI-SET PREMIUM!`);
-            console.log(`==========================================================\n`);
-
-            const nominalDisplayed = transactionData.nominal || transactionData.total_amount || '0';
-            const message = `🎉 *PEMBAYARAN SUKSES!* 🎉\n\n` +
-                             `📦 Produk: ${transactionData.produk || 'Akses Premium'}\n` +
-                             `💰 Nominal: Rp${parseInt(nominalDisplayed).toLocaleString('id-ID')}\n` +
-                             `🌟 Akses premium Anda diaktifkan hingga: *${newExpiryDate.toLocaleDateString("id-ID")}*.`;
-            
-            await bot.telegram.sendMessage(telegramId, message, { parse_mode: 'Markdown' }).catch(e => console.error("Gagal kirim notif premium:", e.message));
-            return; 
-        } catch (error) {
-            console.error("❌ CALLBACK ERROR saat memproses/update database:", error);
-            if (attempt === MAX_RETRIES) { console.error(`❌ Gagal total setelah ${MAX_RETRIES} percobaan.`); }
-            return;
-        }
-    }
-}
-
-
-// ====== FUNGSI PEMROSESAN BARU (Bot Auto-Payment) - DENGAN RETRY LOGIC BARU =====
-async function sendSuccessNotificationNew(refId, transactionData) {
-    
-    const MAX_RETRIES = 5; 
-    const RETRY_DELAY = 1500; // Tunggu 1.5 detik antar percobaan
-
     try {
-        const nominal = transactionData.nominal || transactionData.total_amount;
-        
-        for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-            
-            // 1. Coba update transaksi (tidak peduli status)
-            const updateResult = await TransactionNew.updateOne(
-                { refId: refId }, // Mencari hanya berdasarkan Ref ID
-                { $set: { status: 'SUCCESS', totalBayar: nominal } }
-            );
-
-            if (updateResult.modifiedCount > 0) {
-                // Berhasil diupdate (transaksi awalnya PENDING)
-                console.log(`\n============== CALLBACK SUCCESS LOG (NEW BOT) ==============`);
-                console.log(`✅ [NEW BOT] Transaksi ${refId} berhasil diupdate ke SUCCESS pada percobaan ke-${attempt}.`);
-                console.log(`   Pengiriman produk/saldo DITANGANI oleh webhook handler di server.js utama.`);
-                console.log(`==========================================================\n`);
-                return; 
-            }
-            
-            // Cek apakah transaksi sudah sukses atau tidak ada sama sekali
-            const existingTx = await TransactionNew.findOne({ refId: refId });
-            
-            if (existingTx && existingTx.status === 'SUCCESS') {
-                console.log(`✅ [NEW BOT] Transaksi ${refId} sudah SUCCESS. Mengabaikan notifikasi berulang.`);
-                return;
-            }
-
-            // Jika belum ditemukan dan belum mencapai batas retry
-            if (attempt < MAX_RETRIES) {
-                console.log(`⏳ [NEW BOT] Transaksi ${refId} belum ditemukan di DB. Mencoba lagi dalam ${RETRY_DELAY / 1000} detik (Percobaan ${attempt}/${MAX_RETRIES}).`);
-                await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
-            } else {
-                 console.error(`❌ [NEW BOT] Gagal total mengupdate transaksi ${refId} setelah ${MAX_RETRIES} percobaan. Transaksi mungkin tidak pernah tersimpan.`);
-            }
-        }
-        
+        await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+            method: "POST",
+            body: new URLSearchParams({
+                chat_id: CHANNEL_ID,
+                text: message,
+                parse_mode: "Markdown"
+            })
+        });
     } catch (error) {
-        console.error("❌ [NEW BOT] CALLBACK ERROR saat update database Transaction:", error);
+        console.error(`❌ Gagal mengirim notifikasi ke channel ${CHANNEL_ID}: ${error.message}`);
     }
 }
 
 
-// 🔑 ENDPOINT CALLBACK PUSAT VMP (TERIMA SEMUA DAN PISAHKAN LOGIKA) 🔑
+// ========== DELIVER PRODUCT ==========
+/**
+ * Mengirimkan konten produk ke user.
+ * @param {string} userId - ID User Telegram
+ * @param {string} productId - Mongoose ID Produk
+ * @param {object} transaction - Objek transaksi (untuk info)
+ * @param {object} product - Objek produk (untuk info)
+ */
+async function deliverProductAndNotify(userId, productId, transaction, product) {
+    try {
+        // Logika pengiriman (mengambil 1 stok)
+        // (Harus identik dengan fungsi deliverProduct di bot.js)
+        const productData = await Product.findById(productId);
+
+        if (!productData || productData.kontenProduk.length === 0) {
+            console.warn(`[DELIVER-CB] Stok habis saat callback untuk ID: ${productId}`);
+            // Kirim notif ke admin jika stok habis saat pengiriman?
+            const ADMIN_IDS = process.env.ADMIN_IDS ? process.env.ADMIN_IDS.split(',').map(id => parseInt(id.trim())) : [];
+            if (ADMIN_IDS.length > 0) {
+                sendTelegramMessage(ADMIN_IDS[0], `⚠️ [ADMIN CALLBACK] User ${userId} membeli ${productData?.namaProduk} TAPI STOK HABIS saat dieksekusi! (Ref: ${transaction.refId})`);
+            }
+            return sendTelegramMessage(
+                userId,
+                `⚠️ Pembelian Berhasil (Ref: \`${transaction.refId}\`), namun stok konten habis. Harap hubungi Admin.`
+            );
+        }
+
+        const deliveredContent = productData.kontenProduk.shift(); // Ambil 1 konten
+
+        // Update DB: kurangi stok & konten, tambah terjual
+        await Product.updateOne({ _id: productId }, {
+            $set: { kontenProduk: productData.kontenProduk },
+            $inc: { stok: -1, totalTerjual: 1 }
+        });
+        
+        // Dapatkan stok terbaru (stok awal - 1)
+        const stokAkhir = productData.kontenProduk.length; // Ini adalah stok akhir
+        const stokAwal = stokAkhir + 1; // Ini adalah stok awal sebelum .shift()
+
+        // Kirim notifikasi ke Channel
+        const notifMessage = `🎉 **PENJUALAN BARU (QRIS)** 🎉\n\n` +
+                           `👤 **Pembeli:** [${transaction.userId}](tg://user?id=${transaction.userId})\n` + // Asumsi user ada
+                           `🛍️ **Produk:** \`${product.namaProduk}\`\n` +
+                           `💰 **Total:** \`Rp ${product.harga.toLocaleString('id-ID')}\`\n\n` +
+                           `--- *Info Tambahan* ---\n` +
+                           `📦 **Sisa Stok:** \`${stokAkhir}\` pcs (dari ${stokAwal})\n` +
+                           `🏦 **Metode:** QRIS (VioletPay)\n` +
+                           `🆔 **Ref ID:** \`${transaction.refId}\``;
+        await sendChannelNotification(notifMessage);
+
+        // Dapatkan Stiker Sukses
+        const stickerSetting = await Setting.findOne({ key: 'success_sticker_id' });
+        if (stickerSetting && stickerSetting.value) {
+            await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendSticker`, {
+                method: "POST",
+                body: new URLSearchParams({ chat_id: userId, sticker: stickerSetting.value })
+            }).catch(e => console.log("Gagal kirim stiker CB:", e.message));
+        }
+
+        // Kirim pesan sukses ke user
+        const date = new Date();
+        const dateCreated = `${date.getDate()}/${date.getMonth() + 1}/${date.getFullYear()}, ${date.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).replace(/:/g, '.')}`;
+
+        let successMessage = `📜 *Pembelian Berhasil*\n`;
+        successMessage += `Terimakasih telah Melakukan pembelian di store kami\n\n`;
+        successMessage += `*Informasi Pembelian:*\n`;
+        successMessage += `— *Total Dibayar:* Rp ${transaction.totalBayar.toLocaleString('id-ID')}\n`;
+        successMessage += `— *Date Created:* ${dateCreated}\n`;
+        successMessage += `— *Metode Pembayaran:* QRIS (VioletPay)\n`;
+        successMessage += `— *Jumlah Item:* 1x\n`;
+        successMessage += `— *ID transaksi:* ${transaction.refId}\n\n`;
+        successMessage += `*${product.namaProduk}*\n`;
+        successMessage += "```txt\n";
+        successMessage += `1. ${deliveredContent}\n`;
+        successMessage += "```";
+
+        sendTelegramMessage(userId, successMessage);
+
+    } catch (err) {
+        console.log("[DELIVER-CB] Error:", err);
+        sendTelegramMessage(
+            userId,
+            `❌ Terjadi kesalahan pengiriman produk (Ref: \`${transaction.refId}\`). Hubungi Admin.`
+        );
+    }
+}
+
+// ====================================================================
+// ======================= MEDIUM SECURITY CALLBACK ===================
+// ====================================================================
+
 app.post("/violet-callback", async (req, res) => {
     const data = req.body;
-    
-    const refid = data.ref || data.ref_kode; 
-    const incomingSignature = req.headers['x-callback-signature'] || data.signature;
-    const nominal = data.nominal || data.total_amount || '0';
 
-    const clientIp = req.headers['x-forwarded-for'] ? 
-                             req.headers['x-forwarded-for'].split(',')[0].trim() : 
-                             req.ip;
+    const refid = data.ref || data.ref_id || data.ref_kode;
+    const status = (data.status || "").toLowerCase();
 
-    console.log(`--- CALLBACK DITERIMA PUSAT ---`);
-    console.log(`Ref ID: ${refid}, Status: ${data.status}`);
-    console.log(`IP Pengirim: ${clientIp}`);
+    const incomingSignature =
+        data.signature ||
+        data.sign ||
+        data.sig ||
+        req.headers["x-callback-signature"] ||
+        req.headers["x-signature"] ||
+        req.headers["signature"] ||
+        req.headers["x-hmac-sha256"] ||
+        null;
+
+    const clientIp = getClientIp(req);
+
+    console.log("\n====== CALLBACK MASUK ======");
+    console.log("IP:", clientIp);
+    console.log("REF:", refid);
+    console.log("STATUS:", status);
+    console.log("SIGNATURE:", incomingSignature);
+
+    // 1. Validasi Ref ID
+    if (!refid) {
+        console.log("Ref ID kosong, skip.");
+        return res.status(200).send({ status: true });
+    }
+
+    // 2. Cek apakah ini format ref ID bot baru
+    if (!refid.startsWith("PROD-") && !refid.startsWith("TOPUP-")) {
+        console.log(`⚠ Format ref tidak dikenal: ${refid}. Skip.`);
+        return res.status(200).send({ status: true });
+    }
 
     try {
-        if (!refid) {
-            console.error("❌ Callback: Nomor referensi (ref/ref_kode) tidak ditemukan.");
-            return res.status(400).send({ status: false, message: "Missing reference ID" });
+        // 3. Cari Transaksi
+        const trx = await Transaction.findOne({ refId: refid });
+
+        if (!trx) {
+            console.log(`❌ Transaksi ${refid} tidak ada di DB.`);
+            return res.status(200).send({ status: true });
         }
 
-        // --- 1. VALIDASI SIGNATURE VMP (DIBYPASS JIKA UNDEFINED) ---
-        const calculatedSignature = crypto
-            .createHmac("sha256", VIOLET_SECRET_KEY) 
-            .update(refid + String(nominal)) 
+        if (trx.status === "SUCCESS") {
+            console.log(`✔ Ref ${refid} sudah sukses, skip.`);
+            return res.status(200).send({ status: true });
+        }
+
+        // ========== 4. HITUNG & VALIDASI SIGNATURE ==========
+        // hash_hmac('sha256', $refid, $apikey)
+        const expectedSignature = crypto
+            .createHmac("sha256", VIOLET_API_KEY)
+            .update(refid)
             .digest("hex");
 
-        const isSignatureValid = (calculatedSignature === incomingSignature);
-        const shouldBypassSignature = !incomingSignature || incomingSignature.length < 5;
-
-        if (!isSignatureValid && !shouldBypassSignature) {
-            console.log(`🚫 Signature callback TIDAK VALID! Ditolak. Dikirim: ${incomingSignature}`);
-            return res.status(200).send({ status: false, message: "Invalid signature ignored" });
-        }
-        
-        if (shouldBypassSignature) {
-            console.log(`⚠️ Signature DIBYPASS (Tidak Ditemukan/Undefined). Memproses berdasarkan status.`);
-        }
-
-        // --- 2. CEK STATUS SUKSES & VALIDASI ---
-        if (data.status === "success") {
-            
-            // --- 3. LOGIKA PEMISAHAN REF ID ---
-            if (refid.startsWith('PROD-') || refid.startsWith('TOPUP-')) {
-                // FORMAT BARU (Bot Auto Payment)
-                console.log("✅ Mengalihkan ke pemrosesan BOT BARU (PROD/TOPUP)...");
-                await sendSuccessNotificationNew(refid, data);
-            } else if (refid.includes(':')) {
-                // FORMAT LAMA (Bot Premium, misal: NUXYS:user:id:ts)
-                console.log("✅ Mengalihkan ke pemrosesan BOT LAMA (NUXYS)...");
-                await sendSuccessNotificationOld(refid, data);
-            } else {
-                console.log(`⚠️ Ref ID format tidak dikenali: ${refid}`);
+        if (incomingSignature) {
+            // Jika signature ADA → harus valid
+            if (incomingSignature !== expectedSignature) {
+                console.log(`🚫 Signature mismatch. (Ref: ${refid}). Callback ditolak.`);
+                console.log(`   Expected: ${expectedSignature}`);
+                console.log(`   Received: ${incomingSignature}`);
+                return res.status(200).send({ status: true });
             }
-
-        } else if (data.status !== "success") {
-            console.log(`⚠️ Status callback non-sukses diterima: ${data.status} (Ref: ${refid})`);
+            console.log(`✔ Signature VALID (Ref: ${refid})`);
+        } else {
+            // Jika signature TIDAK ADA → cek IP
+            if (!VMP_ALLOWED_IP.has(clientIp)) {
+                console.log(`🚫 Signature hilang & IP (${clientIp}) bukan IP resmi → REJECT (Ref: ${refid})`);
+                return res.status(200).send({ status: true });
+            }
+            console.log(`⚠ Signature tidak ada, tapi IP (${clientIp}) resmi → CONTINUE (Ref: ${refid})`);
         }
+
+        // ===================================================================
+        // =================== 5. PROSES STATUS CALLBACK =====================
+        // ===================================================================
+
+        if (status === "success") {
+            await Transaction.updateOne(
+                { refId: refid },
+                { status: "SUCCESS", vmpSignature: incomingSignature }
+            );
+
+            console.log(`✅ PROSES SUCCESS (Ref: ${refid})`);
+
+            // ----- JIKA TOP UP -----
+            if (trx.produkInfo.type === "TOPUP") {
+                await User.updateOne(
+                    { userId: trx.userId },
+                    { $inc: { saldo: trx.totalBayar, totalTransaksi: 1 } }
+                );
+
+                const u = await User.findOne({ userId: trx.userId });
+                const saldoAkhir = u ? u.saldo : trx.totalBayar; // Fallback jika user tidak ketemu
+
+                // Kirim Notif Channel
+                const notifMessage = `💰 **TOP-UP SUKSES (QRIS)** 💰\n\n` +
+                                   `👤 **User:** [${u.username || trx.userId}](tg://user?id=${trx.userId})\n` +
+                                   `💰 **Total:** \`Rp ${trx.totalBayar.toLocaleString('id-ID')}\`\n` +
+                                   `🆔 **Ref ID:** \`${trx.refId}\``;
+                await sendChannelNotification(notifMessage);
+                
+                // Kirim Stiker
+                const stickerSetting = await Setting.findOne({ key: 'success_sticker_id' });
+                if (stickerSetting && stickerSetting.value) {
+                    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendSticker`, {
+                        method: "POST",
+                        body: new URLSearchParams({ chat_id: trx.userId, sticker: stickerSetting.value })
+                    }).catch(e => console.log("Gagal kirim stiker CB:", e.message));
+                }
+
+                // Kirim Pesan Sukses
+                sendTelegramMessage(
+                    trx.userId,
+                    `╭─────────────────────────\n│ 🎉 Top Up Saldo Berhasil!\n│ Saldo kini: Rp ${saldoAkhir.toLocaleString("id-ID")}.\n╰─────────────────────────`
+                );
+            
+            // ----- JIKA PRODUK -----
+            } else {
+                const product = await Product.findOne({ namaProduk: trx.produkInfo.namaProduk });
+                if (product) {
+                    // Panggil fungsi deliver yang sudah mencakup notif channel + kirim produk
+                    await deliverProductAndNotify(trx.userId, product._id, trx, product);
+                } else {
+                    sendTelegramMessage(trx.userId, `⚠️ Produk \`${trx.produkInfo.namaProduk}\` tidak ditemukan saat pengiriman (Ref: ${refid}). Hubungi Admin.`);
+                }
+            }
         
-        // --- 4. Wajib mengirim status 200 OK ---
-        res.status(200).send({ status: true, message: "Callback received and processed" }); 
-        
-    } catch (error) {
-        console.error("❌ Callback: Error saat memproses callback:", error);
-        res.status(200).send({ status: false, message: "Internal server error during processing" });
+        // ===================================================================
+        //                        FAILED / EXPIRED
+        // ===================================================================
+        } else if (status === "failed" || status === "expired") {
+            await Transaction.updateOne(
+                { refId: refid },
+                { status: status.toUpperCase() }
+            );
+
+            console.log(`❌ PROSES ${status.toUpperCase()} (Ref: ${refid})`);
+
+            sendTelegramMessage(
+                trx.userId,
+                `❌ *Transaksi ${status.toUpperCase()}!* (Ref: \`${refid}\`)`
+            );
+        }
+
+        return res.status(200).send({ status: true });
+
+    } catch (err) {
+        console.error(`[Callback Error] Ref: ${refid} | Error: ${err.message}`);
+        console.error(err); // Log stack trace
+        return res.status(200).send({ status: true });
     }
 });
 
 
-// 🔑 ENDPOINT DUMMY BARU (JIKA DIPERLUKAN SEBAGAI FALLBACK/TEST) 🔑
-app.post("/paymentbot-callback", async (req, res) => {
-    // Endpoint ini tidak memproses data, hanya log penerimaan
-    console.log(`--- CALLBACK DITERIMA (ENDPOINT BARU/DUMMY) ---`);
-    res.status(200).send({ status: true, message: "Endpoint reached" });
+// ========== START SERVER ==========
+app.listen(PORT, () => {
+    console.log(`🚀 Callback server (Hanya Bot Baru) berjalan di port ${PORT}`);
 });
-
-
-app.listen(PORT, () => console.log(`🚀 Callback server jalan di port ${PORT}`));
