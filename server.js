@@ -1,5 +1,4 @@
-// FILE: index.js — VIOLET CALLBACK (Hanya Bot Baru)
-
+const path = require('path');
 const express = require("express");
 const crypto = require("crypto");
 const mongoose = require("mongoose");
@@ -10,7 +9,7 @@ const { URLSearchParams } = require("url");
 require("dotenv").config();
 
 // ========== ENV ==========
-const BOT_TOKEN = process.env.BOT_TOKEN; // Hanya 1 token
+const BOT_TOKEN = process.env.BOT_TOKEN;
 const VIOLET_API_KEY = process.env.VIOLET_API_KEY;
 const VIOLET_SECRET_KEY = process.env.VIOLET_SECRET_KEY;
 const MONGO_URI = process.env.MONGO_URI;
@@ -52,12 +51,6 @@ function getClientIp(req) {
     );
 }
 
-// ========== SEND TELEGRAM (Disederhanakan) ==========
-/**
- * Mengirim pesan Telegram menggunakan BOT_TOKEN global.
- * @param {string|number} userId - ID User Telegram
- * @param {string} msg - Pesan dalam format Markdown
- */
 async function sendTelegramMessage(userId, msg) {
     if (!BOT_TOKEN) return;
     
@@ -71,8 +64,6 @@ async function sendTelegramMessage(userId, msg) {
     }).catch(e => console.log("[TG SEND ERROR]:", e.message));
 }
 
-// ========== NOTIFIKASI CHANNEL ==========
-// (Fungsi ini diambil dari bot.js untuk notifikasi callback)
 async function sendChannelNotification(message) {
     const CHANNEL_ID = process.env.CHANNEL_ID;
     if (!CHANNEL_ID) {
@@ -95,14 +86,6 @@ async function sendChannelNotification(message) {
 }
 
 
-// ========== DELIVER PRODUCT ==========
-/**
- * Mengirimkan konten produk ke user.
- * @param {string} userId - ID User Telegram
- * @param {string} productId - Mongoose ID Produk
- * @param {object} transaction - Objek transaksi (untuk info)
- * @param {object} product - Objek produk (untuk info)
- */
 async function deliverProductAndNotify(userId, productId, transaction, product) {
     try {
         // Logika pengiriman (mengambil 1 stok)
@@ -182,10 +165,6 @@ async function deliverProductAndNotify(userId, productId, transaction, product) 
     }
 }
 
-// ====================================================================
-// ======================= MEDIUM SECURITY CALLBACK ===================
-// ====================================================================
-
 app.post("/violet-callback", async (req, res) => {
     const data = req.body;
 
@@ -210,20 +189,20 @@ app.post("/violet-callback", async (req, res) => {
     console.log("STATUS:", status);
     console.log("SIGNATURE:", incomingSignature);
 
-    // 1. Validasi Ref ID
+
     if (!refid) {
         console.log("Ref ID kosong, skip.");
         return res.status(200).send({ status: true });
     }
 
-    // 2. Cek apakah ini format ref ID bot baru
+
     if (!refid.startsWith("PROD-") && !refid.startsWith("TOPUP-")) {
         console.log(`⚠ Format ref tidak dikenal: ${refid}. Skip.`);
         return res.status(200).send({ status: true });
     }
 
     try {
-        // 3. Cari Transaksi
+    
         const trx = await Transaction.findOne({ refId: refid });
 
         if (!trx) {
@@ -236,8 +215,7 @@ app.post("/violet-callback", async (req, res) => {
             return res.status(200).send({ status: true });
         }
 
-        // ========== 4. HITUNG & VALIDASI SIGNATURE ==========
-        // hash_hmac('sha256', $refid, $apikey)
+ 
         const expectedSignature = crypto
             .createHmac("sha256", VIOLET_API_KEY)
             .update(refid)
@@ -261,10 +239,6 @@ app.post("/violet-callback", async (req, res) => {
             console.log(`⚠ Signature tidak ada, tapi IP (${clientIp}) resmi → CONTINUE (Ref: ${refid})`);
         }
 
-        // ===================================================================
-        // =================== 5. PROSES STATUS CALLBACK =====================
-        // ===================================================================
-
         if (status === "success") {
             await Transaction.updateOne(
                 { refId: refid },
@@ -273,7 +247,6 @@ app.post("/violet-callback", async (req, res) => {
 
             console.log(`✅ PROSES SUCCESS (Ref: ${refid})`);
 
-            // ----- JIKA TOP UP -----
             if (trx.produkInfo.type === "TOPUP") {
                 await User.updateOne(
                     { userId: trx.userId },
@@ -281,16 +254,14 @@ app.post("/violet-callback", async (req, res) => {
                 );
 
                 const u = await User.findOne({ userId: trx.userId });
-                const saldoAkhir = u ? u.saldo : trx.totalBayar; // Fallback jika user tidak ketemu
-
-                // Kirim Notif Channel
+                const saldoAkhir = u ? u.saldo : trx.totalBayar;
+           
                 const notifMessage = `💰 **TOP-UP SUKSES (QRIS)** 💰\n\n` +
                                    `👤 **User:** [${u.username || trx.userId}](tg://user?id=${trx.userId})\n` +
                                    `💰 **Total:** \`Rp ${trx.totalBayar.toLocaleString('id-ID')}\`\n` +
                                    `🆔 **Ref ID:** \`${trx.refId}\``;
                 await sendChannelNotification(notifMessage);
                 
-                // Kirim Stiker
                 const stickerSetting = await Setting.findOne({ key: 'success_sticker_id' });
                 if (stickerSetting && stickerSetting.value) {
                     await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendSticker`, {
@@ -299,26 +270,23 @@ app.post("/violet-callback", async (req, res) => {
                     }).catch(e => console.log("Gagal kirim stiker CB:", e.message));
                 }
 
-                // Kirim Pesan Sukses
+              
                 sendTelegramMessage(
                     trx.userId,
                     `╭─────────────────────────\n│ 🎉 Top Up Saldo Berhasil!\n│ Saldo kini: Rp ${saldoAkhir.toLocaleString("id-ID")}.\n╰─────────────────────────`
                 );
             
-            // ----- JIKA PRODUK -----
+    
             } else {
                 const product = await Product.findOne({ namaProduk: trx.produkInfo.namaProduk });
                 if (product) {
-                    // Panggil fungsi deliver yang sudah mencakup notif channel + kirim produk
+                  
                     await deliverProductAndNotify(trx.userId, product._id, trx, product);
                 } else {
                     sendTelegramMessage(trx.userId, `⚠️ Produk \`${trx.produkInfo.namaProduk}\` tidak ditemukan saat pengiriman (Ref: ${refid}). Hubungi Admin.`);
                 }
             }
-        
-        // ===================================================================
-        //                        FAILED / EXPIRED
-        // ===================================================================
+   
         } else if (status === "failed" || status === "expired") {
             await Transaction.updateOne(
                 { refId: refid },
@@ -343,7 +311,6 @@ app.post("/violet-callback", async (req, res) => {
 });
 
 
-// ========== START SERVER ==========
 app.listen(PORT, () => {
     console.log(`🚀 Callback server (Hanya Bot Baru) berjalan di port ${PORT}`);
 });
