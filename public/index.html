@@ -3,84 +3,135 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PGVioletPay - Status Dashboard</title>
+    <title>NexusAdmin | Payment Gateway</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
     <link rel="stylesheet" href="style.css">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
 </head>
 <body>
 
-    <header>
-        <h1>🚀 PGVioletPay</h1>
-        <p>Payment Gateway Callback Server Dashboard</p>
-    </header>
-
-    <main class="dashboard-grid">
-        <div class="card">
-            <h3>DATABASE STATUS</h3>
-            <div class="card-content">
-                <div class="status-box" id="db-status-box">
-                    <div class="status-icon" id="db-status-icon">...</div>
-                    <span class="status-text" id="db-status-text">...</span>
+    <div class="app-container">
+        <aside class="sidebar">
+            <div class="brand">
+                <i class="ri-robot-2-fill logo-icon"></i>
+                <div>
+                    <h1>NEXUS</h1>
+                    <span>Bot Controller</span>
                 </div>
             </div>
-        </div>
 
-        <div class="card">
-            <h3>SERVER UPTIME</h3>
-            <div class="card-content">
-                <span id="server-uptime" class="uptime-text">...</span>
+            <div class="menu-label">SYSTEM HEALTH</div>
+            
+            <div class="status-card">
+                <div class="status-item">
+                    <span class="label">Database</span>
+                    <div class="indicator-wrapper">
+                        <span id="db-status-text">...</span>
+                        <div id="db-indicator" class="dot"></div>
+                    </div>
+                </div>
+                <div class="status-item">
+                    <span class="label">Server Uptime</span>
+                    <span id="server-uptime" class="mono-text">00h 00m</span>
+                </div>
+                <div class="status-item">
+                    <span class="label">WebSocket</span>
+                    <div class="indicator-wrapper">
+                        <span id="ws-status-text">Connecting...</span>
+                        <div id="ws-indicator" class="dot pending"></div>
+                    </div>
+                </div>
             </div>
-        </div>
 
-        <div class="card">
-            <h3>TOTAL USERS</h3>
-            <div class="card-content">
-                <span id="total-users" class="stat-number">...</span>
-            </div>
-        </div>
+            <div class="menu-label">ACTIONS</div>
+            <button class="refresh-btn" onclick="location.reload()">
+                <i class="ri-refresh-line"></i> Refresh Dashboard
+            </button>
+        </aside>
 
-        <div class="card">
-            <h3>TOTAL PRODUCTS</h3>
-            <div class="card-content">
-                <span id="total-products" class="stat-number">...</span>
-            </div>
-        </div>
+        <main class="main-content">
+            
+            <header class="stats-overview">
+                <div class="stat-card purple">
+                    <div class="icon-box"><i class="ri-user-star-line"></i></div>
+                    <div class="stat-info">
+                        <span class="stat-title">Total Users</span>
+                        <h2 id="total-users">0</h2>
+                    </div>
+                </div>
 
-        <div class="card">
-            <h3>TOTAL TRANSACTIONS</h3>
-            <div class="card-content">
-                <span id="total-transactions" class="stat-number">...</span>
-            </div>
-        </div>
+                <div class="stat-card blue">
+                    <div class="icon-box"><i class="ri-shopping-bag-3-line"></i></div>
+                    <div class="stat-info">
+                        <span class="stat-title">Products</span>
+                        <h2 id="total-products">0</h2>
+                    </div>
+                </div>
 
-        <div class="card">
-            <h3>SUCCESS TRANSACTIONS</h3>
-            <div class="card-content">
-                <span id="success-transactions" class="stat-number color-success">...</span>
-            </div>
-        </div>
+                <div class="stat-card green">
+                    <div class="icon-box"><i class="ri-money-dollar-circle-line"></i></div>
+                    <div class="stat-info">
+                        <span class="stat-title">Revenue (Trx)</span>
+                        <h2 id="success-transactions">0</h2>
+                        <small>Success Transactions</small>
+                    </div>
+                </div>
 
-        <div class="card">
-            <h3>PENDING TRANSACTIONS</h3>
-            <div class="card-content">
-                <span id="pending-transactions" class="stat-number color-pending">...</span>
-            </div>
-        </div>
+                <div class="stat-card orange">
+                    <div class="icon-box"><i class="ri-loader-4-line"></i></div>
+                    <div class="stat-info">
+                        <span class="stat-title">Pending</span>
+                        <h2 id="pending-transactions">0</h2>
+                    </div>
+                </div>
+            </header>
 
-        <div class="card">
-            <h3>FAILED TRANSACTIONS</h3>
-            <div class="card-content">
-                <span id="failed-transactions" class="stat-number color-failed">...</span>
-            </div>
-        </div>
+            <div class="details-grid">
+                <div class="panel summary-panel">
+                    <div class="panel-header">
+                        <h3><i class="ri-bar-chart-grouped-line"></i> Transaction Overview</h3>
+                    </div>
+                    <div class="summary-row">
+                        <div class="summary-item">
+                            <span>Total Created</span>
+                            <h4 id="total-transactions">0</h4>
+                        </div>
+                        <div class="summary-item danger">
+                            <span>Failed / Expired</span>
+                            <h4 id="failed-transactions">0</h4>
+                        </div>
+                    </div>
+                    <div class="mini-graph">
+                        <div class="bar" style="height: 40%"></div>
+                        <div class="bar active" style="height: 70%"></div>
+                        <div class="bar" style="height: 50%"></div>
+                        <div class="bar" style="height: 90%"></div>
+                        <div class="bar" style="height: 60%"></div>
+                    </div>
+                </div>
 
-        <div class="card log-card">
-            <h3>HEROKU REAL-TIME LOGS</h3>
-            <div class="card-content">
-                <pre id="heroku-logs" class="log-box"></pre>
+                <div class="panel terminal-panel">
+                    <div class="terminal-header">
+                        <div class="terminal-controls">
+                            <span class="control red"></span>
+                            <span class="control yellow"></span>
+                            <span class="control green"></span>
+                        </div>
+                        <div class="terminal-title">
+                            <i class="ri-terminal-box-line"></i> heroku-cli — log-stream
+                        </div>
+                        <div class="live-badge">
+                            <span class="pulse"></span> LIVE
+                        </div>
+                    </div>
+                    <div class="terminal-body">
+                        <pre id="heroku-logs" class="log-content">Initializing connection to Heroku Logplex...</pre>
+                    </div>
+                </div>
             </div>
-        </div>
-    </main>
+
+        </main>
+    </div>
 
     <script src="/socket.io/socket.io.js"></script>
     <script src="script.js"></script>
