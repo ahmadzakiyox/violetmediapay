@@ -10,7 +10,7 @@ const { URLSearchParams } = require("url");
 const path = require('path');
 const http = require('http'); // Untuk Socket.io
 const { Server } = require("socket.io"); // Server Socket.io
-const { LogStream } = require('@heroku-cli/stream'); // Stream Log Heroku
+const Heroku = require('heroku'); // Klien API Heroku
 const stream = require('stream'); // Utility stream Node.js
 
 require("dotenv").config();
@@ -50,6 +50,7 @@ app.use(bodyParser.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ========== MODELS ==========
+// Pastikan path ini benar sesuai struktur folder Anda
 const User = require('./models/User');
 const Product = require('./models/Product');
 const Transaction = require('./models/Transaction');
@@ -248,7 +249,7 @@ app.post("/violet-callback", async (req, res) => {
                 
                 const stickerSetting = await Setting.findOne({ key: 'success_sticker_id' });
                 if (stickerSetting && stickerSetting.value) {
-                    await fetch(`https.api.telegram.org/bot${BOT_TOKEN}/sendSticker`, {
+                    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendSticker`, {
                         method: "POST",
                         body: new URLSearchParams({ chat_id: trx.userId, sticker: stickerSetting.value })
                     }).catch(e => console.log("Gagal kirim stiker CB:", e.message));
@@ -340,48 +341,91 @@ app.get('/dashboard', (req, res) => {
 // ====================================================================
 // ================= LOGIKA: SOCKET.IO LOG STREAM =====================
 // ====================================================================
-io.on('connection', (socket) => {
+
+// Jadikan fungsi callback ini 'async' untuk menunggu stream
+io.on('connection', async (socket) => {
     console.log('🔌 Dashboard Admin terhubung via WebSocket');
     socket.emit('log', { line: '=== [Log Stream] Berhasil terhubung ke server WebSocket ===\n', source: 'server' });
 
+    // Cek apakah variabel .env ada
     if (HEROKU_API_TOKEN && HEROKU_APP_NAME) {
         try {
-            const logStream = new LogStream({
-                heroku: { token: HEROKU_API_TOKEN },
-                app: HEROKU_APP_NAME,
-                lines: 100 // Ambil 100 baris log terakhir
-            });
+            // 1. Inisialisasi klien Heroku
+            const heroku = new Heroku({ token: HEROKU_API_TOKEN });
+            
+            console.log(`📡 Meminta stream log dari Heroku untuk: ${HEROKU_APP_NAME}...`);
+            
+            // 2. Minta stream log (100 baris terakhir & stream baru)
+            const logStream = await heroku.stream(
+                `/apps/${HEROKU_APP_NAME}/log-stream?tail=true&lines=100`
+            );
 
+            console.log(`✅ Stream log terhubung.`);
+
+            // 3. Buat 'logProcessor' untuk menangani chunk stream
             const logProcessor = new stream.Transform({
+                _lastLineData: '', // Simpan sisa data dari chunk sebelumnya
+                
                 transform(chunk, encoding, callback) {
-                    const line = chunk.toString('utf8');
-                    let source = 'app';
-                    if (line.includes('heroku[router]')) source = 'router';
-                    else if (line.includes('heroku[scheduler]')) source = 'scheduler';
+                    // Gabungkan sisa data lama dengan chunk baru, lalu pisah per baris
+                    let data = (this._lastLineData + chunk.toString('utf8')).split('\n');
                     
-                    io.emit('log', { line: line + '\n', source: source });
+                    // Baris terakhir adalah sisa data baru (mungkin tidak utuh)
+                    this._lastLineData = data.pop();
+
+                    // Proses semua baris yang utuh
+                    for (const line of data) {
+                        if (line.trim() === '') continue; // Skip baris kosong
+                        
+                        let source = 'app';
+                        if (line.includes('heroku[router]')) source = 'router';
+                        else if (line.includes('heroku[scheduler]')) source = 'scheduler';
+                        
+                        // Kirim baris utuh + newline ke dashboard
+                        io.emit('log', { line: line + '\n', source: source });
+                    }
+                    callback();
+                },
+                
+                // Kirim sisa data terakhir jika stream ditutup
+                flush(callback) {
+                    if (this._lastLineData) {
+                        let source = 'app';
+                        if (this._lastLineData.includes('heroku[router]')) source = 'router';
+                        io.emit('log', { line: this._lastLineData + '\n', source: source });
+                    }
                     callback();
                 }
             });
 
+            // 4. Salurkan stream dari Heroku ke processor kita
             logStream.pipe(logProcessor);
-            console.log(`📡 Memulai streaming log dari Heroku untuk: ${HEROKU_APP_NAME}`);
-            
+
+            // 5. Tangani error pada stream
             logStream.on('error', (err) => {
                 console.error("Error streaming log Heroku:", err.message);
                 io.emit('log', { line: `=== [Log Stream] ERROR: ${err.message} ===\n`, source: 'error' });
             });
 
+            // 6. Hentikan stream jika klien dashboard terputus
             socket.on('disconnect', () => {
                 console.log('🔌 Dashboard Admin terputus');
-                logStream.abort(); // Hentikan streaming
+                logStream.destroy(); // Matikan stream
             });
 
         } catch (err) {
             console.error("Gagal memulai stream Heroku:", err);
-            io.emit('log', { line: `=== [Log Stream] Gagal memulai stream: ${err.message} ===\n`, source: 'error' });
+            let errorMsg = err.message;
+            // Beri pesan error yang lebih jelas
+            if (err.statusCode === 401) {
+                errorMsg = "Authentication failed. Periksa HEROKU_API_TOKEN.";
+            } else if (err.statusCode === 404) {
+                errorMsg = "App not found. Periksa HEROKU_APP_NAME.";
+            }
+            io.emit('log', { line: `=== [Log Stream] Gagal memulai stream: ${errorMsg} ===\n`, source: 'error' });
         }
     } else {
+        // Jika .env tidak diatur
         socket.emit('log', { line: '=== [Log Stream] HEROKU_API_TOKEN atau HEROKU_APP_NAME tidak diatur. Streaming log dinonaktifkan. ===\n', source: 'error' });
     }
 });
