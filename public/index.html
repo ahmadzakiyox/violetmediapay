@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PGVioletPay - Status Dashboard</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+
+    <header>
+        <h1>🚀 PGVioletPay</h1>
+        <p>Payment Gateway Callback Server Dashboard</p>
+    </header>
+
+    <main class="dashboard-grid">
+        <div class="card">
+            <h3>DATABASE STATUS</h3>
+            <div class="card-content">
+                <div class="status-box" id="db-status-box">
+                    <div class="status-icon" id="db-status-icon">✓</div>
+                    <span class="status-text" id="db-status-text">...</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>SERVER UPTIME</h3>
+            <div class="card-content">
+                <span id="server-uptime" class="uptime-text">...</span>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>TOTAL USERS</h3>
+            <div class="card-content">
+                <span id="total-users" class="stat-number">...</span>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>TOTAL PRODUCTS</h3>
+            <div class="card-content">
+                <span id="total-products" class="stat-number">...</span>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>TOTAL TRANSACTIONS</h3>
+            <div class="card-content">
+                <span id="total-transactions" class="stat-number">...</span>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>SUCCESS TRANSACTIONS</h3>
+            <div class="card-content">
+                <span id="success-transactions" class="stat-number color-success">...</span>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>PENDING TRANSACTIONS</h3>
+            <div class="card-content">
+                <span id="pending-transactions" class="stat-number color-pending">...</span>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>FAILED TRANSACTIONS</h3>
+            <div class="card-content">
+                <span id="failed-transactions" class="stat-number color-failed">...</span>
+            </div>
+        </div>
+    </main>
+
+    <script src="script.js"></script>
+</body>
+</html>
