@@ -1,136 +1,161 @@
-:root {
-    --bg-body: #0f172a;
-    --bg-sidebar: #1e293b;
-    --bg-card: #1e293b;
-    --bg-terminal: #000000;
-    --text-main: #f8fafc;
-    --text-muted: #94a3b8;
+document.addEventListener('DOMContentLoaded', () => {
+    const socket = io();
+    const logContainer = document.getElementById('heroku-logs');
+    let allProducts = []; 
+
+    // --- NAVIGATION LOGIC ---
+    window.switchView = (viewId) => {
+        document.querySelectorAll('.view-section').forEach(el => el.style.display = 'none');
+        document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+        document.getElementById(`view-${viewId}`).style.display = 'block';
+        
+        const navIndex = viewId === 'dashboard' ? 0 : 1;
+        document.querySelectorAll('.nav-item')[navIndex].classList.add('active');
+
+        if(viewId === 'products') loadProducts();
+    };
+
+    // --- PRODUCT MANAGEMENT ---
+    window.loadProducts = async () => {
+        const tbody = document.getElementById('product-table-body');
+        tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding:20px; color:#666;">Loading...</td></tr>';
+        
+        try {
+            const res = await fetch('/api/products');
+            allProducts = await res.json();
+            
+            tbody.innerHTML = '';
+            if(allProducts.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding:20px; color:#666;">No products found. Add one!</td></tr>';
+                return;
+            }
+
+            allProducts.forEach(p => {
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td><span style="background:rgba(59,130,246,0.1); color:#60a5fa; padding:4px 8px; border-radius:4px; font-size:0.8rem;">${p.kategori}</span></td>
+                    <td style="font-weight:600;">${p.namaProduk}</td>
+                    <td style="font-family:'JetBrains Mono', monospace;">Rp ${p.harga.toLocaleString('id-ID')}</td>
+                    <td><span style="color:${p.stok > 0 ? '#10b981' : '#ef4444'}">${p.stok} items</span></td>
+                    <td style="text-align:right;">
+                        <div style="display:inline-flex; gap:5px;">
+                            <button class="btn-icon btn-primary" onclick="openEditModal('${p._id}')" title="Edit"><i class="ri-pencil-line"></i></button>
+                            <button class="btn-icon btn-success" onclick="openStockModal('${p._id}')" title="Add Stock"><i class="ri-database-2-line"></i></button>
+                            <button class="btn-icon btn-danger" onclick="deleteProduct('${p._id}')" title="Delete"><i class="ri-delete-bin-line"></i></button>
+                        </div>
+                    </td>
+                `;
+                tbody.appendChild(row);
+            });
+        } catch (err) { console.error(err); }
+    };
+
+    // Handle Add/Edit Form
+    window.handleProductSubmit = async (e) => {
+        e.preventDefault();
+        const id = document.getElementById('prod-id').value;
+        const data = {
+            kategori: document.getElementById('prod-cat').value,
+            namaProduk: document.getElementById('prod-name').value,
+            harga: parseInt(document.getElementById('prod-price').value),
+            deskripsi: document.getElementById('prod-desc').value
+        };
+
+        const url = id ? `/api/products/${id}` : '/api/products';
+        const method = id ? 'PUT' : 'POST';
+
+        await fetch(url, {
+            method: method,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+
+        closeModal('modal-product');
+        loadProducts();
+    };
+
+    // Handle Stock Form
+    window.handleStockSubmit = async (e) => {
+        e.preventDefault();
+        const id = document.getElementById('stock-prod-id').value;
+        const stockData = document.getElementById('stock-data').value;
+
+        await fetch(`/api/products/${id}/stock`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ newStock: stockData })
+        });
+
+        closeModal('modal-stock');
+        loadProducts();
+    };
+
+    window.deleteProduct = async (id) => {
+        if(!confirm('Are you sure you want to delete this product?')) return;
+        await fetch(`/api/products/${id}`, { method: 'DELETE' });
+        loadProducts();
+    };
+
+    // --- MODAL HELPERS ---
+    window.openModal = (id) => {
+        document.getElementById(id).style.display = 'flex';
+        if(id === 'modal-product') {
+            document.getElementById('product-form').reset();
+            document.getElementById('prod-id').value = '';
+            document.getElementById('modal-title').innerText = 'Add Product';
+        }
+    };
+
+    window.openEditModal = (id) => {
+        const p = allProducts.find(x => x._id === id);
+        if(!p) return;
+        document.getElementById('prod-id').value = p._id;
+        document.getElementById('prod-cat').value = p.kategori;
+        document.getElementById('prod-name').value = p.namaProduk;
+        document.getElementById('prod-price').value = p.harga;
+        document.getElementById('prod-desc').value = p.deskripsi || '';
+        document.getElementById('modal-title').innerText = 'Edit Product';
+        document.getElementById('modal-product').style.display = 'flex';
+    };
+
+    window.openStockModal = (id) => {
+        const p = allProducts.find(x => x._id === id);
+        document.getElementById('stock-prod-id').value = id;
+        document.getElementById('stock-prod-name').innerText = p.namaProduk;
+        document.getElementById('stock-data').value = ''; 
+        document.getElementById('modal-stock').style.display = 'flex';
+    }
+
+    window.closeModal = (id) => document.getElementById(id).style.display = 'none';
+
+    // --- STATS & LOGS ---
+    async function fetchStats() {
+        try {
+            const res = await fetch('/api/stats');
+            const s = await res.json();
+            document.getElementById('total-users').innerText = s.totalUsers;
+            document.getElementById('total-products').innerText = s.totalProducts;
+            document.getElementById('success-transactions').innerText = s.successTransactions;
+            document.getElementById('pending-transactions').innerText = s.pendingTransactions;
+            
+            const dbEl = document.getElementById('db-status-text');
+            if(s.dbStatus === 'CONNECTED') { dbEl.innerText = 'ONLINE'; dbEl.style.color = '#10b981'; }
+            else { dbEl.innerText = s.dbStatus; dbEl.style.color = '#ef4444'; }
+            
+            document.getElementById('server-uptime').innerText = s.serverUptime;
+        } catch (e) { console.log(e); }
+    }
     
-    --accent-purple: #8b5cf6;
-    --accent-blue: #3b82f6;
-    --accent-green: #10b981;
-    --accent-orange: #f59e0b;
-    --accent-red: #ef4444;
-    
-    --border-color: rgba(255,255,255,0.1);
-    --font-main: 'Outfit', sans-serif;
-    --font-mono: 'JetBrains Mono', monospace;
-}
+    socket.on('log', (log) => {
+        if(!logContainer) return;
+        const span = document.createElement('span');
+        span.className = `log-line source-${log.source}`;
+        span.innerText = log.line;
+        logContainer.appendChild(span);
+        if (logContainer.childElementCount > 150) logContainer.removeChild(logContainer.firstChild);
+        logContainer.scrollTop = logContainer.scrollHeight;
+    });
 
-* { margin: 0; padding: 0; box-sizing: border-box; }
-
-body {
-    background-color: var(--bg-body);
-    color: var(--text-main);
-    font-family: var(--font-main);
-    height: 100vh;
-    overflow: hidden; 
-}
-
-.app-container { display: flex; height: 100%; }
-
-/* SIDEBAR */
-.sidebar {
-    width: 260px;
-    background-color: var(--bg-sidebar);
-    border-right: 1px solid var(--border-color);
-    padding: 25px;
-    display: flex; flex-direction: column; gap: 20px;
-}
-
-.brand {
-    display: flex; align-items: center; gap: 15px;
-    padding-bottom: 20px; border-bottom: 1px solid var(--border-color);
-}
-.logo-icon { font-size: 2rem; color: var(--accent-blue); }
-.brand h1 { font-size: 1.2rem; font-weight: 700; letter-spacing: 1px; }
-.brand span { font-size: 0.8rem; color: var(--text-muted); }
-
-.menu-label { font-size: 0.75rem; color: var(--text-muted); font-weight: 600; margin-top: 10px; }
-
-.nav-item {
-    width: 100%; background: transparent; border: none; color: var(--text-muted);
-    padding: 12px; text-align: left; cursor: pointer; font-size: 0.95rem;
-    display: flex; align-items: center; gap: 10px; border-radius: 8px; transition: 0.3s;
-}
-.nav-item:hover, .nav-item.active { background: rgba(59, 130, 246, 0.1); color: var(--accent-blue); }
-
-.status-card { background: rgba(0,0,0,0.2); padding: 15px; border-radius: 12px; border: 1px solid var(--border-color); }
-.status-item { display: flex; justify-content: space-between; font-size: 0.9rem; margin-bottom: 10px; }
-.status-item:last-child { margin-bottom: 0; }
-.mono-text { font-family: var(--font-mono); color: var(--accent-blue); }
-
-/* MAIN */
-.main-content { flex: 1; padding: 30px; overflow-y: auto; display: flex; flex-direction: column; }
-
-/* STATS */
-.stats-overview { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 25px; }
-.stat-card {
-    background: var(--bg-card); padding: 20px; border-radius: 16px;
-    display: flex; align-items: center; gap: 15px; border: 1px solid var(--border-color);
-}
-.icon-box { width: 50px; height: 50px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 1.5rem; }
-.stat-card.purple .icon-box { background: rgba(139, 92, 246, 0.2); color: var(--accent-purple); }
-.stat-card.blue .icon-box { background: rgba(59, 130, 246, 0.2); color: var(--accent-blue); }
-.stat-card.green .icon-box { background: rgba(16, 185, 129, 0.2); color: var(--accent-green); }
-.stat-card.orange .icon-box { background: rgba(245, 158, 11, 0.2); color: var(--accent-orange); }
-.stat-card span { font-size: 0.85rem; color: var(--text-muted); }
-.stat-card h2 { font-size: 1.8rem; font-family: var(--font-mono); }
-
-/* PANELS */
-.panel { background: var(--bg-card); border-radius: 16px; border: 1px solid var(--border-color); overflow: hidden; }
-.panel-header { padding: 20px; border-bottom: 1px solid var(--border-color); }
-.flex-between { display: flex; justify-content: space-between; align-items: center; }
-
-/* TABLES */
-.table-responsive { width: 100%; overflow-x: auto; }
-.cyber-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
-.cyber-table th { text-align: left; padding: 15px; color: var(--text-muted); border-bottom: 1px solid var(--border-color); }
-.cyber-table td { padding: 15px; border-bottom: 1px solid rgba(255,255,255,0.05); color: var(--text-main); }
-.cyber-table tr:hover { background: rgba(255,255,255,0.02); }
-
-/* BUTTONS */
-.btn-primary, .btn-secondary, .btn-success, .btn-danger, .btn-icon {
-    padding: 8px 16px; border-radius: 6px; border: none; cursor: pointer;
-    display: inline-flex; align-items: center; gap: 6px; transition: 0.2s; font-family: inherit;
-}
-.btn-primary { background: var(--accent-blue); color: white; }
-.btn-success { background: var(--accent-green); color: white; }
-.btn-danger { background: rgba(239, 68, 68, 0.2); color: var(--accent-red); }
-.btn-secondary { background: transparent; border: 1px solid var(--border-color); color: var(--text-muted); }
-.btn-icon { padding: 6px; font-size: 1.1rem; }
-
-/* TERMINAL */
-.terminal-panel { background: #000; display: flex; flex-direction: column; height: 400px; }
-.terminal-header { background: #1a1a1a; padding: 10px 20px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #333; }
-.terminal-title { color: #666; font-family: var(--font-mono); font-size: 0.8rem; display: flex; align-items: center; gap: 8px; }
-.live-badge { background: rgba(16, 185, 129, 0.2); color: var(--accent-green); padding: 2px 8px; border-radius: 4px; font-size: 0.7rem; font-weight: bold; }
-.terminal-body { flex: 1; padding: 15px; overflow-y: auto; background: #0c0c0c; }
-.log-content { font-family: 'Consolas', monospace; font-size: 0.85rem; color: #d4d4d4; white-space: pre-wrap; line-height: 1.5; }
-.log-line.source-server { color: var(--accent-green); }
-.log-line.source-error { color: var(--accent-red); }
-.log-line.source-router { color: var(--accent-blue); }
-
-/* MODALS */
-.modal-overlay {
-    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-    background: rgba(0,0,0,0.7); backdrop-filter: blur(5px);
-    display: none; align-items: center; justify-content: center; z-index: 1000;
-}
-.modal-box {
-    background: var(--bg-card); width: 500px; max-width: 90%;
-    border-radius: 12px; padding: 25px; border: 1px solid var(--border-color);
-    box-shadow: 0 20px 50px rgba(0,0,0,0.5);
-}
-.modal-header { display: flex; justify-content: space-between; margin-bottom: 20px; }
-.close-btn { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 1.2rem; }
-.form-group { margin-bottom: 15px; }
-.form-group label { display: block; margin-bottom: 8px; color: var(--text-muted); font-size: 0.9rem; }
-.form-group input, .form-group textarea {
-    width: 100%; background: rgba(0,0,0,0.2); border: 1px solid var(--border-color);
-    color: white; padding: 10px; border-radius: 6px; font-family: inherit;
-}
-.form-group input:focus { border-color: var(--accent-blue); outline: none; }
-.code-input { font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; }
-.modal-footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
-.text-accent { color: var(--accent-blue); font-weight: bold; }
+    fetchStats();
+    setInterval(fetchStats, 5000);
+});
