@@ -1,5 +1,5 @@
 // FILE: index.js
-// Server: Callback + Admin API + Log Streaming
+// Server: Callback + Admin API + Log Streaming + Dashboard
 
 const express = require("express");
 const crypto = require("crypto");
@@ -15,6 +15,7 @@ const stream = require('stream');
 require("dotenv").config();
 
 // ========== ENV VARS ==========
+// Menggunakan 1 token saja sesuai permintaan sebelumnya
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const VIOLET_API_KEY = process.env.VIOLET_API_KEY;
 const VIOLET_SECRET_KEY = process.env.VIOLET_SECRET_KEY;
@@ -42,13 +43,22 @@ const io = new Server(server);
 
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
+
+// --- PENTING: Menyajikan File Dashboard (Public) ---
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ========== MODELS ==========
+// Pastikan file model ini ada di folder models/
 const User = require('./models/User');
 const Product = require('./models/Product');
 const Transaction = require('./models/Transaction');
 const Setting = require('./models/Setting'); 
+
+// ========== RUTE DASHBOARD ==========
+// Ini yang memperbaiki error "Cannot GET /dashboard"
+app.get('/dashboard', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
 
 // ========== HELPER: IP & TELEGRAM ==========
 const VMP_ALLOWED_IP = new Set(["202.155.132.37", "2001:df7:5300:9::122"]);
