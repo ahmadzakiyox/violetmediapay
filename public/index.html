@@ -19,7 +19,7 @@
             <h3>DATABASE STATUS</h3>
             <div class="card-content">
                 <div class="status-box" id="db-status-box">
-                    <div class="status-icon" id="db-status-icon">✓</div>
+                    <div class="status-icon" id="db-status-icon">...</div>
                     <span class="status-text" id="db-status-text">...</span>
                 </div>
             </div>
@@ -73,8 +73,16 @@
                 <span id="failed-transactions" class="stat-number color-failed">...</span>
             </div>
         </div>
+
+        <div class="card log-card">
+            <h3>HEROKU REAL-TIME LOGS</h3>
+            <div class="card-content">
+                <pre id="heroku-logs" class="log-box"></pre>
+            </div>
+        </div>
     </main>
 
+    <script src="/socket.io/socket.io.js"></script>
     <script src="script.js"></script>
 </body>
 </html>
