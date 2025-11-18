@@ -236,62 +236,98 @@ io.on('connection', async (socket) => {
     socket.emit('log', { line: '=== [Log Stream] Menghubungkan ke Heroku... ===\n', source: 'server' });
 
     let active = true;
-    let controller = new AbortController(); // Untuk membatalkan fetch jika disconnect
+    let controller = new AbortController(); // Untuk membatalkan fetch stream
 
     if (HEROKU_API_TOKEN && HEROKU_APP_NAME) {
         try {
-            // Gunakan FETCH (bukan package heroku) untuk menghindari error constructor
-            const response = await fetch(`https://api.heroku.com/apps/${HEROKU_APP_NAME}/log-stream?tail=true&lines=100`, {
+            // 1. BUAT LOG SESSION (Cara Resmi Heroku API)
+            console.log(`📡 Membuat Log Session untuk: ${HEROKU_APP_NAME}`);
+            
+            const sessionResponse = await fetch(`https://api.heroku.com/apps/${HEROKU_APP_NAME}/log-sessions`, {
+                method: 'POST',
                 headers: {
                     'Authorization': `Bearer ${HEROKU_API_TOKEN}`,
-                    'Accept': 'application/vnd.heroku+json; version=3'
+                    'Accept': 'application/vnd.heroku+json; version=3',
+                    'Content-Type': 'application/json'
                 },
+                body: JSON.stringify({
+                    lines: 100, // Ambil 100 baris terakhir
+                    tail: true  // Lanjutkan streaming log baru
+                }),
                 signal: controller.signal
             });
 
-            if (!response.ok) throw new Error(`Heroku API: ${response.status} ${response.statusText}`);
+            if (!sessionResponse.ok) {
+                const errText = await sessionResponse.text();
+                throw new Error(`Gagal membuat sesi log: ${sessionResponse.status} ${sessionResponse.statusText} - ${errText}`);
+            }
 
-            console.log(`✅ Log stream terhubung ke ${HEROKU_APP_NAME}`);
+            const sessionData = await sessionResponse.json();
+            const logplexUrl = sessionData.logplex_url;
+
+            if (!logplexUrl) throw new Error("Heroku tidak mengembalikan Logplex URL.");
+
+            console.log(`✅ Sesi dibuat. Menyambungkan ke Logplex...`);
+
+            // 2. STREAMING DARI LOGPLEX URL
+            const streamResponse = await fetch(logplexUrl, {
+                signal: controller.signal
+            });
+
+            if (!streamResponse.ok) throw new Error(`Logplex Error: ${streamResponse.status}`);
+
             socket.emit('log', { line: '=== [Log Stream] Terhubung! ===\n', source: 'server' });
 
-            // Proses stream body
-            const bodyStream = response.body;
+            // 3. PROSES STREAM BODY
+            const bodyStream = streamResponse.body;
             const logProcessor = new stream.Transform({
                 transform(chunk, encoding, callback) {
+                    // Logplex mengirim data mentah, kita pisahkan berdasarkan baris baru
                     const lines = chunk.toString('utf8').split('\n');
                     for (const line of lines) {
                         if (!line.trim()) continue;
+                        
                         let source = 'app';
                         if (line.includes('heroku[router]')) source = 'router';
                         else if (line.includes('heroku[scheduler]')) source = 'scheduler';
+                        
                         socket.emit('log', { line: line + '\n', source: source });
                     }
                     callback();
                 }
             });
 
-            // Pipe stream fetch ke processor
+            // Pipe stream ke processor
             bodyStream.pipe(logProcessor);
 
-            // Handle Error Stream
+            // Handle Error pada Stream yang sedang berjalan
             bodyStream.on('error', (err) => {
                 if (active) socket.emit('log', { line: `=== [Stream Error] ${err.message} ===\n`, source: 'error' });
             });
 
         } catch (err) {
+            // Jangan log error jika user sendiri yang memutus koneksi (refresh/tutup tab)
             if (err.name !== 'AbortError') {
                 console.error("Gagal Stream Heroku:", err.message);
-                socket.emit('log', { line: `=== [Log Error] Gagal memulai: ${err.message} ===\n`, source: 'error' });
+                
+                let cleanMsg = err.message;
+                // Deteksi jika nama aplikasi salah (404 saat create session)
+                if (cleanMsg.includes("404 Not Found")) {
+                    cleanMsg = `Aplikasi '${HEROKU_APP_NAME}' tidak ditemukan. Cek .env Anda.`;
+                }
+
+                socket.emit('log', { line: `=== [Log Error] ${cleanMsg} ===\n`, source: 'error' });
             }
         }
     } else {
-        socket.emit('log', { line: '=== [Config Error] HEROKU_API_TOKEN/APP_NAME belum diatur ===\n', source: 'error' });
+        socket.emit('log', { line: '=== [Config Error] HEROKU_API_TOKEN atau HEROKU_APP_NAME belum diatur di .env ===\n', source: 'error' });
     }
 
+    // Bersihkan saat user disconnect
     socket.on('disconnect', () => {
         console.log('🔌 Dashboard terputus');
         active = false;
-        controller.abort(); // Matikan koneksi fetch ke Heroku
+        controller.abort(); // Matikan semua request fetch yang menggantung
     });
 });
 
