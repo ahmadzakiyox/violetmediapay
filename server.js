@@ -85,6 +85,15 @@ async function sendChannelNotification(message) {
     }
 }
 
+function formatUptime(seconds) {
+    function pad(s) {
+        return (s < 10 ? '0' : '') + s;
+    }
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${pad(hours)}h ${pad(minutes)}m ${pad(secs)}s`;
+}
 
 async function deliverProductAndNotify(userId, productId, transaction, product) {
     try {
@@ -310,6 +319,57 @@ app.post("/violet-callback", async (req, res) => {
     }
 });
 
+app.get('/api/stats', async (req, res) => {
+    try {
+        // 1. Dapatkan data secara paralel
+        const [
+            totalUsers,
+            totalProducts,
+            totalTransactions,
+            successTransactions,
+            pendingTransactions,
+            failedTransactions
+        ] = await Promise.all([
+            User.countDocuments(),
+            Product.countDocuments(),
+            Transaction.countDocuments(),
+            Transaction.countDocuments({ status: 'SUCCESS' }),
+            Transaction.countDocuments({ status: 'PENDING' }),
+            Transaction.countDocuments({ status: { $in: ['FAILED', 'EXPIRED'] } })
+        ]);
+
+        // 2. Dapatkan status DB
+        // 0 = disconnected, 1 = connected, 2 = connecting, 3 = disconnecting
+        const dbState = mongoose.connection.readyState;
+        let dbStatus = 'DISCONNECTED';
+        if (dbState === 1) dbStatus = 'CONNECTED';
+        if (dbState === 2) dbStatus = 'CONNECTING';
+
+        // 3. Dapatkan Uptime Server (dari process)
+        const uptimeSeconds = process.uptime();
+        const uptimeFormatted = formatUptime(uptimeSeconds);
+
+        // 4. Kirim sebagai JSON
+        res.json({
+            dbStatus: dbStatus,
+            serverUptime: uptimeFormatted,
+            totalUsers: totalUsers,
+            totalProducts: totalProducts,
+            totalTransactions: totalTransactions,
+            successTransactions: successTransactions,
+            pendingTransactions: pendingTransactions,
+            failedTransactions: failedTransactions
+        });
+
+    } catch (error) {
+        console.error("Error fetching stats:", error);
+        res.status(500).json({ error: "Failed to fetch stats" });
+    }
+});
+
+app.get('/admin', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
 
 app.listen(PORT, () => {
     console.log(`🚀 Callback server (Hanya Bot Baru) berjalan di port ${PORT}`);
